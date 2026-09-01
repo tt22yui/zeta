@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9C7BFF"/>
+      <stop offset="1" stop-color="#4B3FE3"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 背景：圆角方形（squircle） -->
+  <rect x="40" y="40" width="944" height="944" rx="212" fill="url(#bg)"/>
+
+  <!-- 环扣 ζ：横杠 + 斜杆 + 卷尾回环 -->
+  <path d="M 320 372 H 684 M 684 372 L 490 600 M 490 600
+           C 458 640 426 654 395 630
+           C 502 640 598 664 641 748
+           C 672 812 640 852 586 852
+           C 532 852 511 808 501 746"
+        stroke="#FFFFFF"
+        stroke-width="86"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        fill="none"/>
+</svg>
