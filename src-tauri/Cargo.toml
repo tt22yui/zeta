@@ -1,6 +1,6 @@
 [package]
 name = "zeta"
-version = "0.4.4"
+version = "0.1.0"
 description = "A file tagging tool"
 authors = ["you"]
 edition = "2021"
