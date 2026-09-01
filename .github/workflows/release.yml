@@ -1,0 +1,78 @@
+name: release
+
+# 打 v* 格式标签时触发发布构建；也可在 Actions 页面手动触发
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# 发布到 GitHub Releases（草稿）需要内容写入权限
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    strategy:
+      # macOS 构建偶尔超时，避免一个平台失败拖垮全部
+      fail-fast: false
+      matrix:
+        include:
+          # macOS 产 dmg；Windows 只产 exe 并压缩成 ZIP（无需 NSIS）
+          - {
+              platform: macos-latest,
+              bundle_args: "",
+              release_files: "src-tauri/target/release/bundle/dmg/*.dmg",
+            }
+          - {
+              platform: windows-latest,
+              bundle_args: "-- --no-bundle",
+              release_files: "src-tauri/target/release/bundle/zip/Zeta-win64-*.zip",
+            }
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          lfs: true
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+
+      - name: 安装 Rust（stable）
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust 依赖缓存
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri"
+
+      - name: 安装前端依赖
+        run: npm install
+
+      # 显式调用项目本地已安装的 CLI，避免 tauri-action 隔离环境找不到 tauri
+      - name: 构建前端 + Rust + 打包
+        run: npm run tauri build ${{ matrix.bundle_args }}
+
+      # Windows 官方 bundle 无 zip；这里把 --no-bundle 产出的 exe 压成 ZIP（解压即用）
+      - name: 打包 Windows 绿色版 ZIP
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path src-tauri/target/release/bundle/zip | Out-Null
+          Compress-Archive `
+            -Path src-tauri/target/release/zeta.exe `
+            -DestinationPath "src-tauri/target/release/bundle/zip/Zeta-win64-${{ github.ref_name }}.zip"
+          Get-Item "src-tauri/target/release/bundle/zip/*.zip" | Select-Object Name, Length
+
+      # 上传产物到与 tag 同名的 Release，并以草稿形式保存，审核后方可发布
+      - name: 上传到 Release 草稿
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Zeta ${{ github.ref_name }}
+          draft: true
+          generate_release_notes: true
+          files: ${{ matrix.release_files }}
