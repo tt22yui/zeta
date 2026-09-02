@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getVersion } from "@tauri-apps/api/app";
 import { watchImmediate } from "@tauri-apps/plugin-fs";
 import {
   addTag,
@@ -168,6 +169,8 @@ export default function App() {
   const [renamingIdx, setRenamingIdx] = useState<number | null>(null);
   const [renameVal, setRenameVal] = useState("");
   const renameRef = useRef<HTMLInputElement | null>(null);
+  // 运行时版本号（标题栏用）
+  const [appVersion, setAppVersion] = useState("");
   const addrRef = useRef<HTMLInputElement | null>(null);
   // 地址栏容器（用于点击外部关闭历史下拉）
   const addrWrapRef = useRef<HTMLDivElement | null>(null);
@@ -183,6 +186,13 @@ export default function App() {
   // （后端另有 5 秒 fail-safe 兜底，见 lib.rs setup）。
   useEffect(() => {
     void win.show();
+  }, []);
+
+  // 读取运行时版本号，展示在标题栏品牌标识右侧
+  useEffect(() => {
+    getVersion()
+      .then(setAppVersion)
+      .catch(() => {});
   }, []);
 
   // 进入行内重命名时聚焦并全选
@@ -1053,6 +1063,9 @@ export default function App() {
           <span className="titlebar-mark" aria-hidden="true">#</span>
           <span className="titlebar-name" data-tauri-drag-region>
             Zeta
+            {appVersion ? (
+              <span className="titlebar-ver" data-tauri-drag-region>v{appVersion}</span>
+            ) : null}
           </span>
         </div>
 
