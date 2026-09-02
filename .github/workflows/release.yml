@@ -7,7 +7,7 @@ on:
       - "v*"
   workflow_dispatch:
 
-# 发布到 GitHub Releases（草稿）需要内容写入权限
+# 发布到 GitHub Releases 需要内容写入权限
 permissions:
   contents: write
 
@@ -68,12 +68,11 @@ jobs:
             -DestinationPath "src-tauri/target/release/bundle/zip/Zeta-win64-${{ github.ref_name }}.zip"
           Get-Item "src-tauri/target/release/bundle/zip/*.zip" | Select-Object Name, Length
 
-      # 上传产物到与 tag 同名的 Release，并以草稿形式保存，审核后方可发布
-      - name: 上传到 Release 草稿
+      # 上传产物到与 tag 同名的 Release，直接发布
+      - name: 发布到 Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: Zeta ${{ github.ref_name }}
-          draft: true
           body_path: CHANGELOG.md
           files: ${{ matrix.release_files }}
