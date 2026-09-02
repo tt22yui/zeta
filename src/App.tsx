@@ -7,7 +7,9 @@ import {
   deleteFile,
   getDefaultDir,
   getDrives,
+  getHomeDir,
   listDir,
+  listSubdirs,
   openInDefault,
   removeTag,
   renameFile,
@@ -119,6 +121,21 @@ export default function App() {
     }
   });
   const [histOpen, setHistOpen] = useState(false);
+  // 面包屑子目录下拉：{path 对应层级, 定位坐标, 子文件夹列表}
+  const [crumbMenu, setCrumbMenu] = useState<{
+    path: string;
+    left: number;
+    top: number;
+    items: string[];
+  } | null>(null);
+  // 历史下拉键盘焦点下标
+  const [histFocus, setHistFocus] = useState(-1);
+  const histPanelRef = useRef<HTMLDivElement | null>(null);
+  const histItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const crumbCloseTimer = useRef<number>();
+  // 盘符下拉
+  const [driveOpen, setDriveOpen] = useState(false);
+  const driveWrapRef = useRef<HTMLDivElement | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -292,18 +309,162 @@ export default function App() {
     setAddrEdit(true);
   }, [path]);
 
-  /** 地址栏提交：空则取消；否则跳转到输入的路径（支持 UNC/SMB） */
+  /** 地址栏提交：空则取消；支持 `~` 展开主目录与 UNC/SMB；否则跳转到输入路径 */
   const commitAddr = useCallback(() => {
-    const target = addrValue.trim();
+    const raw = addrValue.trim();
     setAddrEdit(false);
-    if (!target || target === path) return;
-    void navigate(target);
+    if (!raw || raw === path) return;
+    // `~` 或 `~\...`：展开为用户主目录（按平台分隔符）
+    const hp = isMac ? "~/" : "~\\";
+    if (raw === "~" || raw.startsWith(hp)) {
+      void (async () => {
+        try {
+          const home = (await getHomeDir()).trim().replace(/[\\/]+$/, "");
+          if (!home) return;
+          void navigate(raw === "~" ? home : home + raw.slice(1));
+        } catch {
+          /* 主目录不可得时忽略 */
+        }
+      })();
+      return;
+    }
+    void navigate(raw);
   }, [addrValue, navigate, path]);
 
   /** 地址栏取消编辑 */
   const cancelAddr = useCallback(() => {
     setAddrEdit(false);
   }, []);
+
+  /** 面包屑下钻：悬停某段时异步拉取该层级的子文件夹并定位下拉 */
+  const openCrumbMenu = useCallback(
+    async (dir: string, el: HTMLElement) => {
+      window.clearTimeout(crumbCloseTimer.current);
+      const r = el.getBoundingClientRect();
+      const left = Math.max(4, Math.min(r.left, window.innerWidth - 224));
+      let items: string[] = [];
+      try {
+        items = await listSubdirs(dir);
+      } catch {
+        items = [];
+      }
+      setCrumbMenu({ path: dir, left, top: r.bottom + 4, items });
+    },
+    []
+  );
+
+  const closeCrumbMenuSoon = useCallback(() => {
+    window.clearTimeout(crumbCloseTimer.current);
+    crumbCloseTimer.current = window.setTimeout(() => setCrumbMenu(null), 160);
+  }, []);
+
+  const keepCrumbMenu = useCallback(() => {
+    window.clearTimeout(crumbCloseTimer.current);
+  }, []);
+
+  // 历史下拉键盘导航：↑↓/Home/End 移动、Enter 跳转、Delete 删除、Esc 关闭
+  const histKeyNav = useCallback(
+    (ev: ReactKeyboardEvent) => {
+      const n = addrHist.length;
+      if (n === 0) return;
+      const k = ev.key;
+      if (
+        ["ArrowDown", "ArrowUp", "Home", "End", "Enter", "Delete", "Backspace", "Escape"].includes(k)
+      ) {
+        ev.preventDefault();
+        ev.stopPropagation();
+      }
+      const focus = (i: number) => {
+        setHistFocus(i);
+        histItemRefs.current[i]?.focus({ preventScroll: true });
+      };
+      switch (k) {
+        case "ArrowDown":
+          focus((histFocus + 1 + n) % n);
+          break;
+        case "ArrowUp":
+          focus((histFocus - 1 + n) % n);
+          break;
+        case "Home":
+          focus(0);
+          break;
+        case "End":
+          focus(n - 1);
+          break;
+        case "Enter": {
+          const p = addrHist[histFocus];
+          if (p) {
+            setHistOpen(false);
+            if (p !== path) void navigate(p);
+          }
+          break;
+        }
+        case "Delete":
+        case "Backspace": {
+          const p = addrHist[histFocus];
+          if (p) {
+            setAddrHist((prev) => {
+              const next = prev.filter((x) => x !== p);
+              try {
+                localStorage.setItem("zeta.addrHist", JSON.stringify(next));
+              } catch {
+                /* 忽略 */
+              }
+              return next;
+            });
+            focus(Math.max(0, histFocus - 1));
+          }
+          break;
+        }
+        case "Escape":
+          setHistOpen(false);
+          break;
+      }
+    },
+    [addrHist, histFocus, path, navigate]
+  );
+
+  // 历史下拉打开时把焦点交给面板，方便纯键盘遍历；关闭时复位
+  useEffect(() => {
+    if (histOpen) {
+      setHistFocus(-1);
+      histPanelRef.current?.focus({ preventScroll: true });
+    }
+  }, [histOpen]);
+
+  // 点击面包屑下拉外部或 Esc 时关闭
+  useEffect(() => {
+    if (!crumbMenu) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!addrWrapRef.current?.contains(e.target as Node)) setCrumbMenu(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setCrumbMenu(null);
+    };
+    window.setTimeout(() => window.addEventListener("click", onDoc), 0);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", onDoc);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [crumbMenu]);
+
+  // 点击盘符下拉外部或 Esc 时关闭
+  useEffect(() => {
+    if (!driveOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!driveWrapRef.current?.contains(e.target as Node)) setDriveOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setDriveOpen(false);
+    };
+    window.setTimeout(() => window.addEventListener("click", onDoc), 0);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", onDoc);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [driveOpen]);
 
   const tagCounts = useMemo(() => {
     const m = new Map<string, number>();
@@ -334,6 +495,9 @@ export default function App() {
 
   const folders = entries.filter((e) => e.is_dir).length;
   const files = entries.length - folders;
+
+  // 当前所在的盘符（UNC 路径时无盘符）
+  const currentDrive = drives.find((d) => path.startsWith(d)) ?? null;
 
   /** 切换排序：点同字段反向，切字段时大小/时间默认降序、名称默认升序 */
   const applySort = useCallback(
@@ -936,22 +1100,43 @@ export default function App() {
             <IconRedo size={16} />
           </button>
           <div className="vsep" />
-          <div className="drive-select">
-            {drives.map((d) => (
-              <button
-                key={d}
-                className={path.startsWith(d) ? "drive active" : "drive"}
-                onClick={() => navigate(d)}
-                title={`转到 ${d}`}
-                aria-pressed={path.startsWith(d)}
-              >
-                {d.replace("\\", "")}
-              </button>
-            ))}
+          <div className="drive-select" ref={driveWrapRef}>
+            <button
+              className="drive-trigger"
+              onClick={(ev) => {
+                ev.stopPropagation();
+                setDriveOpen((v) => !v);
+              }}
+              title={currentDrive ?? "已连接盘符"}
+              aria-haspopup="menu"
+              aria-expanded={driveOpen}
+            >
+              <span>{currentDrive?.replace("\\", "") ?? "盘"}</span>
+              <IconSortArrow dir="desc" size={11} className="caret" />
+            </button>
+            {driveOpen && (
+              <div className="drive-menu" role="menu" aria-label="选择盘符">
+                {drives.map((d) => (
+                  <button
+                    key={d}
+                    role="menuitem"
+                    className={`drive-item ${path.startsWith(d) ? "active" : ""}`}
+                    onClick={(ev) => {
+                      ev.stopPropagation();
+                      setDriveOpen(false);
+                      navigate(d);
+                    }}
+                  >
+                    <span className="drive-item-label">{d.replace("\\", "")}</span>
+                    <span className="drive-item-path">{d}</span>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
-        <div className="addrbar" ref={addrWrapRef}>
+        <div className="addrbar" ref={addrWrapRef} onMouseLeave={closeCrumbMenuSoon}>
           {addrEdit ? (
             <input
               ref={addrRef}
@@ -971,8 +1156,19 @@ export default function App() {
                   <span className="crumb">{path || "/"}</span>
                 ) : (
                   breadcrumbs.map((c, i) => (
-                    <span className="crumb" key={i}>
-                      <button className={i === breadcrumbs.length - 1 ? "cur" : ""} onClick={() => navigate(c.path)}>
+                    <span
+                      className="crumb"
+                      key={i}
+                      onMouseEnter={(ev) => openCrumbMenu(c.path, ev.currentTarget)}
+                    >
+                      <button
+                        className={i === breadcrumbs.length - 1 ? "cur" : ""}
+                        onClick={(ev) => {
+                          ev.stopPropagation(); // 避免冒泡到容器的进入编辑态
+                          setCrumbMenu(null);
+                          navigate(c.path);
+                        }}
+                      >
                         {c.label}
                       </button>
                       <span className="crumb-sep">{isMac ? "/" : "\\"}</span>
@@ -993,15 +1189,31 @@ export default function App() {
                 <IconSortArrow dir="desc" size={12} className="caret" />
               </button>
               {histOpen && (
-                <div className="addr-hist">
+                <div
+                  className="addr-hist"
+                  role="menu"
+                  aria-label="最近的路径"
+                  tabIndex={-1}
+                  ref={histPanelRef}
+                  onKeyDown={histKeyNav}
+                >
                   <div className="addr-hist-title">最近的路径</div>
                   {addrHist.length === 0 ? (
                     <div className="addr-hist-empty">暂无记录</div>
                   ) : (
-                    addrHist.map((p) => (
+                    addrHist.map((p, i) => (
                       <button
                         key={p}
-                        className={`addr-hist-item ${p === path ? "cur" : ""}`}
+                        ref={(el) => {
+                          histItemRefs.current[i] = el;
+                        }}
+                        role="menuitem"
+                        tabIndex={histFocus === i ? 0 : -1}
+                        className={`addr-hist-item ${p === path ? "cur" : ""} ${histFocus === i ? "focused" : ""}`}
+                        onMouseEnter={(ev) => {
+                          setHistFocus(i);
+                          ev.currentTarget.focus({ preventScroll: true });
+                        }}
                         onClick={(ev) => {
                           ev.stopPropagation();
                           setHistOpen(false);
@@ -1011,6 +1223,58 @@ export default function App() {
                       >
                         <IconFolder size={14} className="addr-hist-icon" />
                         <span className="addr-hist-path">{p}</span>
+                        <span
+                          className="addr-hist-del"
+                          role="button"
+                          tabIndex={-1}
+                          aria-label={`从历史中移除 ${p}`}
+                          title="从历史中移除"
+                          onClick={(ev) => {
+                            ev.stopPropagation();
+                            setAddrHist((prev) => {
+                              const next = prev.filter((x) => x !== p);
+                              try {
+                                localStorage.setItem("zeta.addrHist", JSON.stringify(next));
+                              } catch {
+                                /* 忽略 */
+                              }
+                              return next;
+                            });
+                          }}
+                        >
+                          ×
+                        </span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+              {crumbMenu && (
+                <div
+                  className="crumb-menu"
+                  style={{ left: crumbMenu.left, top: crumbMenu.top }}
+                  onMouseEnter={keepCrumbMenu}
+                  onMouseLeave={closeCrumbMenuSoon}
+                  onClick={(ev) => ev.stopPropagation()}
+                >
+                  <div className="crumb-menu-title">{crumbMenu.path}</div>
+                  {crumbMenu.items.length === 0 ? (
+                    <div className="crumb-menu-empty">无子文件夹</div>
+                  ) : (
+                    crumbMenu.items.map((sub) => (
+                      <button
+                        key={sub}
+                        className="crumb-menu-item"
+                        onClick={() => {
+                          setCrumbMenu(null);
+                          if (sub !== path) void navigate(sub);
+                        }}
+                        title={sub}
+                      >
+                        <IconFolder size={14} className="crumb-menu-icon" />
+                        <span className="crumb-menu-name">
+                          {sub.split(/\\|\//).filter(Boolean).pop()}
+                        </span>
                       </button>
                     ))
                   )}

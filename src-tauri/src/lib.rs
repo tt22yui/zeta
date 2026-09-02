@@ -214,6 +214,36 @@ fn list_dir(path: String) -> Result<Vec<FileEntry>, String> {
     Ok(entries)
 }
 
+/// 列出指定目录下的子文件夹完整路径（用于地址栏面包屑下钻）。
+/// 过滤隐藏/系统项；目录不存在或不可读时返回 Err。
+#[tauri::command(async)]
+fn list_subdirs(path: String) -> Result<Vec<String>, String> {
+    let dir = PathBuf::from(&path);
+    let read = fs::read_dir(&dir).map_err(|e| e.to_string())?;
+    let mut subs = Vec::new();
+    for item in read.flatten() {
+        let full = item.path();
+        let name = item.file_name().to_string_lossy().to_string();
+        let Ok(meta) = item.metadata() else { continue };
+        if is_system_file(&meta, &name) || is_hidden(&meta, &name) {
+            continue;
+        }
+        if meta.is_dir() {
+            subs.push(full.to_string_lossy().to_string());
+        }
+    }
+    subs.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    Ok(subs)
+}
+
+/// 用户主目录，用于地址栏 `~` 展开为绝对路径。
+#[tauri::command(async)]
+fn get_home_dir() -> Result<String, String> {
+    dirs::home_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .ok_or_else(|| "无法定位用户主目录".to_string())
+}
+
 /// Windows 可用的盘符列表，如 ["C:\\", "D:\\"]。
 #[tauri::command(async)]
 fn get_drives() -> Vec<String> {
@@ -426,8 +456,10 @@ pub fn run() {
         .manage(History::new())
         .invoke_handler(tauri::generate_handler![
             list_dir,
+            list_subdirs,
             get_drives,
             get_default_dir,
+            get_home_dir,
             add_tag,
             remove_tag,
             rename_file,
