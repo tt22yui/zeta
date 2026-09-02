@@ -33,6 +33,45 @@ struct History {
     redo: Mutex<Vec<RenameOp>>,
 }
 
+impl History {
+    fn new() -> Self {
+        Self {
+            undo: Mutex::new(Vec::new()),
+            redo: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// 记录一次改名：压入撤销栈，并清空重做栈（新操作使重做失效）。
+    fn record(&self, op: RenameOp) {
+        self.undo.lock().unwrap().push(op);
+        self.redo.lock().unwrap().clear();
+    }
+
+    fn push_undo(&self, op: RenameOp) {
+        self.undo.lock().unwrap().push(op);
+    }
+
+    fn pop_undo(&self) -> Option<RenameOp> {
+        self.undo.lock().unwrap().pop()
+    }
+
+    fn push_redo(&self, op: RenameOp) {
+        self.redo.lock().unwrap().push(op);
+    }
+
+    fn pop_redo(&self) -> Option<RenameOp> {
+        self.redo.lock().unwrap().pop()
+    }
+
+    fn can_undo(&self) -> bool {
+        !self.undo.lock().unwrap().is_empty()
+    }
+
+    fn can_redo(&self) -> bool {
+        !self.redo.lock().unwrap().is_empty()
+    }
+}
+
 #[derive(Serialize)]
 struct FileEntry {
     name: String,   // 含扩展名的完整文件名
@@ -239,11 +278,10 @@ fn do_rename(state: &History, from: &str, to: &str) -> Result<(), String> {
         return Err(format!("目标文件名已存在：{}", to));
     }
     fs::rename(from, to).map_err(|e| e.to_string())?;
-    state.undo.lock().unwrap().push(RenameOp {
+    state.record(RenameOp {
         from: from.to_string(),
         to: to.to_string(),
     });
-    state.redo.lock().unwrap().clear();
     Ok(())
 }
 
@@ -306,16 +344,13 @@ fn remove_tag(path: String, tag: String, state: State<History>) -> Result<String
 #[tauri::command(async)]
 fn undo(state: State<History>) -> Result<(), String> {
     let op = state
-        .undo
-        .lock()
-        .unwrap()
-        .pop()
+        .pop_undo()
         .ok_or_else(|| "没有可撤销的操作".to_string())?;
     if Path::new(&op.from).exists() {
         return Err(format!("无法撤销：源文件已不存在：{}", op.from));
     }
     fs::rename(&op.to, &op.from).map_err(|e| e.to_string())?;
-    state.redo.lock().unwrap().push(op);
+    state.push_redo(op);
     Ok(())
 }
 
@@ -323,27 +358,24 @@ fn undo(state: State<History>) -> Result<(), String> {
 #[tauri::command(async)]
 fn redo(state: State<History>) -> Result<(), String> {
     let op = state
-        .redo
-        .lock()
-        .unwrap()
-        .pop()
+        .pop_redo()
         .ok_or_else(|| "没有可重做的操作".to_string())?;
     if Path::new(&op.to).exists() {
         return Err(format!("无法重做：目标文件已存在：{}", op.to));
     }
     fs::rename(&op.from, &op.to).map_err(|e| e.to_string())?;
-    state.undo.lock().unwrap().push(op);
+    state.push_undo(op);
     Ok(())
 }
 
 #[tauri::command(async)]
 fn can_undo(state: State<History>) -> bool {
-    !state.undo.lock().unwrap().is_empty()
+    state.can_undo()
 }
 
 #[tauri::command(async)]
 fn can_redo(state: State<History>) -> bool {
-    !state.redo.lock().unwrap().is_empty()
+    state.can_redo()
 }
 
 fn sibling_path(parent_file: &str, new_file_name: &str) -> String {
@@ -391,10 +423,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_fs::init())
-        .manage(History {
-            undo: Mutex::new(Vec::new()),
-            redo: Mutex::new(Vec::new()),
-        })
+        .manage(History::new())
         .invoke_handler(tauri::generate_handler![
             list_dir,
             get_drives,
@@ -462,4 +491,135 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running zeta application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 按真实解析语义构造 FileEntry：base 为不含扩展名的主名，name 由 base+tags+ext 拼出。
+    fn entry(base: &str, ext: &str, tags: Vec<&str>) -> FileEntry {
+        let mut name = base.to_string();
+        for t in &tags {
+            name.push('#');
+            name.push_str(t);
+        }
+        if !ext.is_empty() {
+            name.push('.');
+            name.push_str(ext);
+        }
+        FileEntry {
+            name,
+            path: format!("C:/tmp/{base}"),
+            is_dir: false,
+            is_hidden: false,
+            ext: ext.to_string(),
+            base: base.to_string(),
+            tags: tags.into_iter().map(|s| s.to_string()).collect(),
+            size: 0,
+            modified: 0,
+        }
+    }
+
+    #[test]
+    fn parse_tags_splits_stem() {
+        let (base, tags) = parse_tags("报告#工作#重要");
+        assert_eq!(base, "报告");
+        assert_eq!(tags, vec!["工作", "重要"]);
+    }
+
+    #[test]
+    fn parse_tags_no_tag_keeps_full_stem() {
+        let (base, tags) = parse_tags("README");
+        assert_eq!(base, "README");
+        assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn parse_tags_filters_empty_segments() {
+        let (base, tags) = parse_tags("文档##脏标签"); // 连续 # 的空段被过滤
+        assert_eq!(base, "文档");
+        assert_eq!(tags, vec!["脏标签"]);
+    }
+
+    #[test]
+    fn build_new_name_appends_tag_before_ext() {
+        let e = entry("报告", "md", vec!["工作"]);
+        assert_eq!(build_new_name(&e, "重要"), "报告#工作#重要.md");
+    }
+
+    #[test]
+    fn build_new_name_first_tag_no_ext() {
+        let e = entry("笔记", "", vec![]);
+        assert_eq!(build_new_name(&e, "读书"), "笔记#读书");
+    }
+
+    #[test]
+    fn strip_tag_removes_one_and_keeps_rest() {
+        let e = entry("报告", "md", vec!["工作", "重要"]);
+        assert_eq!(strip_tag(&e, "工作"), Some("报告#重要.md".to_string()));
+    }
+
+    #[test]
+    fn strip_tag_absent_returns_none() {
+        let e = entry("报告", "md", vec!["工作"]);
+        assert_eq!(strip_tag(&e, "不存在"), None);
+    }
+
+    #[test]
+    fn strip_tag_last_removes_hash_and_ext_kept() {
+        let e = entry("报告", "md", vec!["工作"]);
+        assert_eq!(strip_tag(&e, "工作"), Some("报告.md".to_string()));
+    }
+
+    #[test]
+    fn history_record_pushes_undo_and_clears_redo() {
+        let h = History::new();
+        h.record(rename_op("a.txt", "b#标签.txt"));
+        assert!(h.can_undo());
+        assert!(!h.can_redo());
+        // 新操作到来时清空重做栈
+        h.pop_undo();
+        h.push_redo(rename_op("b#标签.txt", "a.txt"));
+        assert!(h.can_redo());
+        h.record(rename_op("c.txt", "d.txt"));
+        assert!(!h.can_redo());
+        assert!(h.can_undo());
+    }
+
+    #[test]
+    fn history_undo_redo_roundtrip() {
+        let h = History::new();
+        h.record(rename_op("a.txt", "b.txt"));
+        h.record(rename_op("b.txt", "c.txt"));
+
+        let back = h.pop_undo().unwrap();
+        assert_eq!(back.from, "b.txt");
+        assert_eq!(back.to, "c.txt");
+        h.push_redo(back);
+
+        let first = h.pop_undo().unwrap();
+        assert_eq!(first.from, "a.txt");
+        assert_eq!(first.to, "b.txt");
+
+        let forwards = h.pop_redo().unwrap();
+        assert_eq!(forwards.from, "b.txt");
+        assert_eq!(forwards.to, "c.txt");
+    }
+
+    #[test]
+    fn history_empty_has_no_action() {
+        let h = History::new();
+        assert!(!h.can_undo());
+        assert!(!h.can_redo());
+        assert!(h.pop_undo().is_none());
+        assert!(h.pop_redo().is_none());
+    }
+
+    fn rename_op(from: &str, to: &str) -> RenameOp {
+        RenameOp {
+            from: from.to_string(),
+            to: to.to_string(),
+        }
+    }
 }
