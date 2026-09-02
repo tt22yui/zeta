@@ -155,6 +155,9 @@ export default function App() {
   // 地址栏容器（用于点击外部关闭历史下拉）
   const addrWrapRef = useRef<HTMLDivElement | null>(null);
   const renameCommitted = useRef(false);
+  // 记录本应用发起的文件操作时间点：随后较短窗口内的 watch 自动刷新会被跳过，
+  // 避免“操作后显式 reload + watch 防抖 reload”造成的重复加载闪烁。
+  const selfOpAt = useRef(0);
 
   useEffect(() => () => window.clearTimeout(typeTimer.current), []);
 
@@ -432,6 +435,9 @@ export default function App() {
       if (!alive) return;
       window.clearTimeout(timer);
       timer = window.setTimeout(() => {
+        // 本应用操作（打标签/删除/重命名）后已显式 reload，
+        // 由同一操作触发的 watch 事件在短窗口内跳过，避免重复加载闪烁。
+        if (Date.now() - selfOpAt.current < 1500) return;
         void reload();
       }, 300);
     })
@@ -490,6 +496,7 @@ export default function App() {
   }, [ctxMenu]);
 
   const applyTagToSelection = useCallback(async () => {
+    selfOpAt.current = Date.now();
     const tag = tagInput.trim();
     if (!tag || selected.size === 0) {
       setError(selected.size === 0 ? "请先在列表中选择文件" : "标签不能为空");
@@ -511,6 +518,7 @@ export default function App() {
   const applyTagFromSidebar = useCallback(
     async (tag: string) => {
       if (selected.size === 0) return;
+      selfOpAt.current = Date.now();
       setError("");
       const byPath = new Map<string, string[]>();
       for (const e of entries) byPath.set(e.path, e.tags);
@@ -532,6 +540,7 @@ export default function App() {
 
   const removeTagFrom = useCallback(
     async (entry: FileEntry, tag: string) => {
+      selfOpAt.current = Date.now();
       try {
         await removeTag(entry.path, tag);
         await reload();
@@ -560,10 +569,15 @@ export default function App() {
   // 移除目标路径的「打标签」：清空其所有标签
   const clearAllTags = useCallback(
     async (paths: string[]) => {
+      selfOpAt.current = Date.now();
       try {
         for (const p of paths) {
           const e = entries.find((x) => x.path === p);
-          if (e) for (const t of e.tags) await removeTag(p, t);
+          if (!e) continue;
+          // 每移除一个标签就会改名一次，需用返回的新路径作为下一次的源路径，
+          // 否则旧路径文件已不存在，会报「系统找不到指定的文件」。
+          let cur = p;
+          for (const t of e.tags) cur = await removeTag(cur, t);
         }
         await reload();
       } catch (err) {
@@ -653,6 +667,7 @@ export default function App() {
   const commitRename = useCallback(async () => {
     if (renameCommitted.current) return;
     renameCommitted.current = true;
+    selfOpAt.current = Date.now();
     const idx = renamingIdx;
     const entry = idx == null ? null : visibleEntries[idx];
     const v = renameVal.trim();
@@ -782,6 +797,7 @@ export default function App() {
           const paths = [...selected];
           if (window.confirm(`将 ${paths.length} 项移动到回收站？`)) {
             void (async () => {
+              selfOpAt.current = Date.now();
               try {
                 for (const p of paths) await deleteFile(p);
                 await reload();
@@ -1287,6 +1303,7 @@ export default function App() {
             const n = ctxMenu.paths.length;
             if (window.confirm(`将 ${n} 项移动到回收站？`)) {
               void (async () => {
+                selfOpAt.current = Date.now();
                 try {
                   for (const p of ctxMenu.paths) await deleteFile(p);
                   closeCtxMenu();

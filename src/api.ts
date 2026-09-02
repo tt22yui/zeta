@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { openPath } from "@tauri-apps/plugin-opener";
 import type { FileEntry } from "./types";
 
 export function listDir(path: string): Promise<FileEntry[]> {
@@ -47,6 +48,6 @@ export function canRedo(): Promise<boolean> {
 
 /** 用系统默认应用打开文件/文件夹（tauri-plugin-opener） */
 export function openInDefault(path: string): Promise<void> {
-  return invoke<void>("plugin:opener|open_path", { path });
+  return openPath(path);
 }
 
