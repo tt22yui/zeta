@@ -50,7 +50,7 @@ jobs:
           workspaces: "./src-tauri"
 
       - name: 安装前端依赖
-        run: npm install
+        run: npm ci
 
       # 显式调用项目本地已安装的 CLI，避免 tauri-action 隔离环境找不到 tauri
       - name: 构建前端 + Rust + 打包

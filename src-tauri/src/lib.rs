@@ -112,7 +112,7 @@ fn is_system_file(meta: &fs::Metadata, name: &str) -> bool {
 }
 
 /// 列出某个目录下的文件与文件夹。
-#[tauri::command]
+#[tauri::command(async)]
 fn list_dir(path: String) -> Result<Vec<FileEntry>, String> {
     let dir = PathBuf::from(&path);
     let read = fs::read_dir(&dir).map_err(|e| e.to_string())?;
@@ -176,7 +176,7 @@ fn list_dir(path: String) -> Result<Vec<FileEntry>, String> {
 }
 
 /// Windows 可用的盘符列表，如 ["C:\\", "D:\\"]。
-#[tauri::command]
+#[tauri::command(async)]
 fn get_drives() -> Vec<String> {
     (b'A'..=b'Z')
         .filter_map(|c| {
@@ -191,7 +191,7 @@ fn get_drives() -> Vec<String> {
 }
 
 /// 应用启动时的默认位置：下载目录（找不到时回退到主目录）。
-#[tauri::command]
+#[tauri::command(async)]
 fn get_default_dir() -> Result<String, String> {
     dirs::download_dir()
         .or_else(dirs::home_dir)
@@ -248,7 +248,7 @@ fn do_rename(state: &History, from: &str, to: &str) -> Result<(), String> {
 }
 
 /// 给一个文件/文件夹追加标签（重命名）。
-#[tauri::command]
+#[tauri::command(async)]
 fn add_tag(path: String, tag: String, state: State<History>) -> Result<String, String> {
     let sanitized: String = tag.chars().filter(|c| *c != '#').collect();
     if sanitized.trim().is_empty() {
@@ -262,7 +262,7 @@ fn add_tag(path: String, tag: String, state: State<History>) -> Result<String, S
 }
 
 /// 重命名文件/文件夹（可撤销）。
-#[tauri::command]
+#[tauri::command(async)]
 fn rename_file(from: String, to: String, state: State<History>) -> Result<(), String> {
     if from == to {
         return Ok(());
@@ -274,7 +274,7 @@ fn rename_file(from: String, to: String, state: State<History>) -> Result<(), St
 /// 删除文件/文件夹。
 /// 本地路径移入系统回收站（可恢复，不计入撤销栈）；
 /// UNC 网络共享不支持回收站，改为永久删除（`remove_file` / `remove_dir_all`）。
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_file(path: String) -> Result<(), String> {
     let is_unc = path.starts_with("\\\\");
     let p = Path::new(&path);
@@ -293,7 +293,7 @@ fn delete_file(path: String) -> Result<(), String> {
 }
 
 /// 从文件名中移除指定标签。
-#[tauri::command]
+#[tauri::command(async)]
 fn remove_tag(path: String, tag: String, state: State<History>) -> Result<String, String> {
     let entry = build_entry(&path)?;
     let new_name = strip_tag(&entry, &tag).ok_or("该文件不包含此标签")?;
@@ -303,7 +303,7 @@ fn remove_tag(path: String, tag: String, state: State<History>) -> Result<String
 }
 
 /// 撤销上一步改名。
-#[tauri::command]
+#[tauri::command(async)]
 fn undo(state: State<History>) -> Result<(), String> {
     let op = state
         .undo
@@ -320,7 +320,7 @@ fn undo(state: State<History>) -> Result<(), String> {
 }
 
 /// 重做被撤销的改名。
-#[tauri::command]
+#[tauri::command(async)]
 fn redo(state: State<History>) -> Result<(), String> {
     let op = state
         .redo
@@ -336,12 +336,12 @@ fn redo(state: State<History>) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn can_undo(state: State<History>) -> bool {
     !state.undo.lock().unwrap().is_empty()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn can_redo(state: State<History>) -> bool {
     !state.redo.lock().unwrap().is_empty()
 }
