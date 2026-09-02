@@ -10,6 +10,16 @@ export function getDrives(): Promise<string[]> {
   return invoke<string[]>("get_drives");
 }
 
+/** 列出 path 下的子文件夹完整路径（地址栏面包屑下钻用） */
+export function listSubdirs(path: string): Promise<string[]> {
+  return invoke<string[]>("list_subdirs", { path });
+}
+
+/** 用户主目录，用于地址栏 `~` 展开 */
+export function getHomeDir(): Promise<string> {
+  return invoke<string>("get_home_dir");
+}
+
 export function getDefaultDir(): Promise<string> {
   return invoke<string>("get_default_dir");
 }

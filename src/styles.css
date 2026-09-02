@@ -263,18 +263,55 @@ input { font: inherit; user-select: text; }
 
 .nav-btns { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
 
-.drive-select { display: flex; gap: 4px; }
-.drive {
-  min-width: 30px;
+.drive-select { position: relative; flex-shrink: 0; }
+.drive-trigger {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 44px;
   height: var(--icn);
   padding: 0 8px;
   border-radius: var(--r-sm);
   font-size: 13px;
+  font-weight: 600;
   color: var(--text-2);
   transition: background 120ms ease, color 120ms ease;
 }
-.drive:hover { background: var(--surface-3); color: var(--text); }
-.drive.active { background: var(--accent-soft); color: var(--accent-text); font-weight: 600; }
+.drive-trigger:hover { background: var(--surface-3); color: var(--text); }
+.drive-trigger[aria-expanded="true"] { background: var(--accent-soft); color: var(--accent-text); }
+.drive-trigger .caret { display: block; opacity: 0.6; }
+.drive-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 120;
+  min-width: 200px;
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.14);
+  font-size: 13px;
+  animation: ctx-in 110ms ease-out;
+}
+.drive-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 7px 8px;
+  border-radius: var(--r-sm);
+  color: var(--text-2);
+  text-align: left;
+  transition: background 90ms ease, color 90ms ease;
+}
+.drive-item:hover { background: var(--surface-3); color: var(--text); }
+.drive-item.active { color: var(--accent-text); font-weight: 600; }
+.drive-item-label { flex-shrink: 0; }
+.drive-item-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); }
 
 /* 地址栏：Windows 资源管理器风格，可点击面包屑，也可切到文本框输入（含 UNC/SMB） */
 .addrbar {
@@ -385,6 +422,69 @@ input { font: inherit; user-select: text; }
 .addr-hist-item.cur { color: var(--accent-text); font-weight: 600; }
 .addr-hist-icon { flex-shrink: 0; opacity: 0.55; }
 .addr-hist-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.addr-hist:focus { outline: none; }
+.addr-hist-item.focused { background: var(--surface-3); color: var(--text); }
+.addr-hist-del {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-left: auto;
+  border-radius: var(--r-sm);
+  font-size: 14px;
+  line-height: 1;
+  color: var(--text-3);
+  visibility: hidden;
+  transition: background 90ms ease, color 90ms ease;
+}
+.addr-hist-item:hover .addr-hist-del,
+.addr-hist-item.focused .addr-hist-del { visibility: visible; }
+.addr-hist-del:hover { background: var(--surface-3); color: var(--danger, #e5484d); }
+
+/* 面包屑子目录下拉：基于视口定位，不受 crumbbar 横向滚动裁剪 */
+.crumb-menu {
+  position: fixed;
+  z-index: 130;
+  min-width: 220px;
+  max-width: 340px;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.14);
+  font-size: 13px;
+  animation: ctx-in 110ms ease-out;
+}
+.crumb-menu-title {
+  padding: 4px 8px 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.crumb-menu-empty { padding: 10px 8px; color: var(--text-3); }
+.crumb-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 7px 8px;
+  border-radius: var(--r-sm);
+  color: var(--text-2);
+  text-align: left;
+  transition: background 90ms ease, color 90ms ease;
+}
+.crumb-menu-item:hover { background: var(--surface-3); color: var(--text); }
+.crumb-menu-icon { flex-shrink: 0; opacity: 0.55; }
+.crumb-menu-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 刷新图标：复用重做箭头并旋转为纵置刷新示意 */
 .refresh-btn svg { transform: rotate(45deg); display: block; }
