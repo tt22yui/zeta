@@ -1,0 +1,75 @@
+# Zeta — AI 协作规则
+
+> 本文件供 AI 编码助手（Cursor / Claude Code / Codex / Trae 等）在改进、审查、发布本项目时自动遵循。
+> 规则来源于本项目的既有硬性约定与历史经验，改动前请优先核对本文件。
+
+## 项目概览
+
+- **Zeta** 是一个基于 **Tauri v2** 的桌面文件管理器（带文件标签功能），**公开开源项目**。
+
+- 后端：Rust。前端：React / TypeScript / Tailwind CSS / Vite。
+
+- 解析/业务纯逻辑集中在 `src-tauri/src/lib.rs`；前端入口 `src/App.tsx`、IPC 封装 `src/api.ts`。
+
+## 发布与打包规范
+
+- **发布包仅包含 macOS dmg 和 Windows zip 绿色包，禁止生成 NSIS 安装包**。
+
+- Windows zip 文件名必须为英文，格式：`Zeta-win64-v<版本号>.zip`。
+
+- macOS dmg 文件名为 `Zeta_x.x.x_*.dmg`。
+
+- 版本号遵循语义化版本；**每次发布包变更需更新版本号**（package.json、src-tauri/Cargo.toml、tauri.conf.json 等处保持一致）。
+
+- Tauri 构建 `--bundles` 参数不支持 `zip`：Windows 发布用 `--no-bundle` 生成 exe 后**手动压缩为 zip**。
+
+- Tauri build 缓存可能记录旧项目路径，路径变更后需 `cargo clean` 清空 `target` 缓存。
+
+- Vite 开发服务器调试端口固定为 `5117`（`strictPort: true`），Tauri `devUrl` 指向 `http://localhost:5117`。
+
+- 发布流程：提交代码 → 更新版本号 → 创建对应 git 标签 → 构建发布包。
+
+## 代码与工程约定
+
+- **命令应标记** **`#[tauri::command(async)]`**，将文件 I/O 放到异步线程池，避免阻塞 UI 主线程；保留 `State` 参数即可。
+
+- **纯逻辑要抽成可独立测试的函数/结构体**（如 `parse_tags`、`build_new_name`、`strip_tag`、`History`），命令层只做薄封装；用 `cargo test` 覆盖（零配置即可运行）。
+
+- 标签编进文件名（如 `报告#工作#重要.md`）。**移除多个标签时，要累积每次改名后的新路径**，不要复用旧路径，否则报「找不到文件」。
+
+- 文件瘦身：避免把业务逻辑堆积成单个超大文件；保持 `lib.rs` 职责单一。
+
+- 地址栏分隔符按平台统一：Windows 用 `\`，macOS 用 `/`。
+
+- 地址栏访问历史：去重、最近优先、持久化保留 30 条，**仅记录成功进入的目录**。
+
+- `@tauri-apps/plugin-fs` 的 `watch()` 有约 2000ms 批量防抖，需用 `watchImmediate()` 实现实时监听。
+
+- UNC 路径（SMB 共享）不支持 notify 监听，需用约 3 秒定时轮询自动刷新（用 silent 模式避免加载闪烁）。
+
+- **避免重复加载**：应用内操作（打标签/删除/重命名）后显式 reload 了就不应再由本次触发的事件重复 reload（用 `selfOpAt` 短窗口标记跳过自身 watch）。
+
+- 验证：改动后用 `npm run tsc -- --noEmit`（前端）、`cargo check` / `cargo test`（后端）确认通过。
+
+## 安全与隐私
+
+- **生产环境必须配置 CSP**（`security.csp`），不要留 `null`；CSP 需豁免 IPC（`connect-src 'self' ipc: http://ipc.localhost`），dev 用 `devCsp: null` 以便 HMR。
+
+- **权限白名单最小化**：只在 `src-tauri/capabilities/default.json` 声明确实用到的权限；`core:window:default` 已含 `is-maximized`/`is-minimized` 等，不要重复声明；删除权限时先核对 `src-tauri/gen/schemas/acl-manifests.json`。
+
+- 前端一律经 IPC 调命令访问后端能力，不直接内联系统级操作；外部能力（如用默认应用打开路径）走官方插件包并配对应权限（如 `opener:allow-open-path`）。
+
+- 窗口/启动避免白屏：`visible: false` 隐藏启动 + 原生 `backgroundColor` + 前端就绪后 `show()`（配 `core:window:allow-show`）。
+
+## 提交与隐私审查（开源注意事项）
+
+- 本项目为**公开开源仓库**，任何提交的历史都不会被轻易抹除。**提交前必须进行隐私/敏感内容审查**。
+
+- **禁止**提交：`.env`、凭据、API 密钥、个人真实用户名/本机绝对路径（如 `C:\Users\<用户名>`、`/Users/`）、本地独有配置（如 `.trae/`）。
+
+- 使用 `git add` 时按文件逐个确认，**不要盲目** **`git add -A`** **/** **`git add .`**，避免把敏感文件带进历史。
+
+- 定位到个人路径泄漏时，用 `git filter-repo` / `git filter-branch` 重写历史并校验远端无残留。
+
+- 提交信息遵循 Conventional Commits（`feat`/`fix`/`refactor`/`chore`/`docs` 等）。
+
