@@ -5,7 +5,9 @@ import { getVersion } from "@tauri-apps/api/app";
 import { watchImmediate } from "@tauri-apps/plugin-fs";
 import {
   addTag,
+  copyText,
   deleteFile,
+  dissolveFolder,
   getDefaultDir,
   getDrives,
   getHomeDir,
@@ -30,6 +32,7 @@ import {
   IconSortArrow,
   IconTag,
 } from "./icons";
+import PreviewPane from "./PreviewPane";
 
 const win = getCurrentWindow();
 const isMac = typeof navigator !== "undefined" && /Mac|Macintosh/i.test(navigator.userAgent);
@@ -154,6 +157,8 @@ export default function App() {
     paths: string[];
     single: FileEntry | null;
   } | null>(null);
+  // 空格预览面板：当前预览的文件路径；null 表示面板关闭
+  const [previewPath, setPreviewPath] = useState<string | null>(null);
 
   // 键盘导航：光标行下标（列表内 roving tabindex）+ 行 DOM 引用
   const [cursor, setCursor] = useState(-1);
@@ -502,6 +507,23 @@ export default function App() {
     });
     return sorted;
   }, [entries, search, sortKey, sortDesc]);
+
+  // 空格预览面板当前条目：从 visibleEntries 按 previewPath 派生，
+  // 列表刷新后自动同步到新 entry 对象（路径不变）
+  const previewEntry = useMemo(
+    () => (previewPath ? visibleEntries.find((e) => e.path === previewPath) ?? null : null),
+    [previewPath, visibleEntries]
+  );
+
+  // 预览打开期间，selected 变化时把 previewPath 同步到首个选中项，
+  // 便于在预览面板打开时用 ↑↓ 切换文件、预览内容跟随更新
+  useEffect(() => {
+    if (!previewPath) return;
+    const first = visibleEntries.find((e) => selected.has(e.path));
+    if (first && !first.is_dir && first.path !== previewPath) {
+      setPreviewPath(first.path);
+    }
+  }, [selected, visibleEntries, previewPath]);
 
   const folders = entries.filter((e) => e.is_dir).length;
   const files = entries.length - folders;
@@ -951,7 +973,37 @@ export default function App() {
         setSelected(new Set(visibleEntries.map((e) => e.path)));
         return;
       }
+      // 复制路径：Ctrl+Shift+C（资源管理器惯例）
+      if (ctrl && ev.shiftKey && (ev.key === "C" || ev.key === "c")) {
+        ev.preventDefault();
+        const target = visibleEntries.find((e) => selected.has(e.path));
+        if (target) void copyText(target.path);
+        return;
+      }
+      // 复制文件名：Ctrl+C（仅文本，非文件级剪贴板）
+      if (ctrl && !ev.shiftKey && (ev.key === "C" || ev.key === "c")) {
+        ev.preventDefault();
+        const target = visibleEntries.find((e) => selected.has(e.path));
+        if (target) void copyText(target.name);
+        return;
+      }
+      // 空格预览：打开时再按关闭；未打开时预览当前选中文件（目录不预览）
+      if (ev.key === " " || ev.code === "Space") {
+        ev.preventDefault();
+        if (previewPath) {
+          setPreviewPath(null);
+        } else {
+          const target = visibleEntries.find((e) => selected.has(e.path));
+          if (target && !target.is_dir) setPreviewPath(target.path);
+        }
+        return;
+      }
       if (ev.key === "Escape") {
+        // 预览打开时优先关闭预览，不清空选中
+        if (previewPath) {
+          setPreviewPath(null);
+          return;
+        }
         setSelected(new Set());
         return;
       }
@@ -1003,7 +1055,7 @@ export default function App() {
         }
       }
     },
-    [visibleEntries, selected, startRename, reload, selectOnly, cursor]
+    [visibleEntries, selected, startRename, reload, selectOnly, cursor, previewPath]
   );
 
   // 取消选择后焦点在列表容器时，方向键重新起导航（光标 -1 时从首行开始）
@@ -1591,13 +1643,44 @@ export default function App() {
               })();
             }
           }}
+          onDissolve={() => {
+            const single = ctxMenu.single;
+            if (!single || !single.is_dir) return;
+            if (window.confirm(`解散文件夹「${single.name}」？\n内部子项将上移到当前目录，空壳删除。可用 Ctrl+Z 撤销。`)) {
+              void (async () => {
+                selfOpAt.current = Date.now();
+                try {
+                  await dissolveFolder(single.path);
+                  closeCtxMenu();
+                  await reload();
+                } catch (e) {
+                  setError(String(e));
+                }
+              })();
+            }
+          }}
           onClearTags={() => {
             if (!ctxMenu.paths.length) return;
             closeCtxMenu();
             void clearAllTags(ctxMenu.paths);
           }}
+          onCopyName={() => {
+            const single = ctxMenu.single;
+            if (!single) return;
+            closeCtxMenu();
+            void copyText(single.name);
+          }}
+          onCopyPath={() => {
+            const single = ctxMenu.single;
+            if (!single) return;
+            closeCtxMenu();
+            void copyText(single.path);
+          }}
         />
       )}
+
+      {/* 空格预览面板：右侧抽屉式浮层 */}
+      <PreviewPane entry={previewEntry} onClose={() => setPreviewPath(null)} />
     </div>
   );
 }
@@ -1654,6 +1737,9 @@ type ContextMenuProps = {
   onRename: () => void;
   onDelete: () => void;
   onClearTags: () => void;
+  onCopyName: () => void;
+  onCopyPath: () => void;
+  onDissolve: () => void;
 };
 
 /**
@@ -1662,12 +1748,12 @@ type ContextMenuProps = {
  * 并按实际尺寸 clamp 到视口内，避免右下角溢出。
  */
 function ContextMenu(props: ContextMenuProps) {
-  const { x, y, paths, single, onClose, onRefresh, onOpenEntry, onRename, onDelete, onClearTags } = props;
+  const { x, y, paths, single, onClose, onRefresh, onOpenEntry, onRename, onDelete, onClearTags, onCopyName, onCopyPath, onDissolve } = props;
   const menuRef = useRef<HTMLDivElement | null>(null);
   const itemRefs = useRef<(HTMLDivElement | null)[]>([]);
 
   // 组装菜单项：统一渲染便于键盘导航
-  const items: { key: string; label: string; danger: boolean; action: () => void }[] = [];
+  const items: { key: string; label: string; danger: boolean; accel?: string; action: () => void }[] = [];
   const showClearTags = single ? single.tags.length > 0 : paths.length > 1;
   if (!paths.length) {
     items.push({ key: "refresh", label: "刷新", danger: false, action: onRefresh });
@@ -1679,7 +1765,13 @@ function ContextMenu(props: ContextMenuProps) {
         danger: false,
         action: onOpenEntry,
       });
+    // 复制类操作：仅单选时展示，多选场景路径/文件名含义模糊
+    if (single) {
+      items.push({ key: "copyname", label: "复制文件名", danger: false, accel: "Ctrl+C", action: onCopyName });
+      items.push({ key: "copypath", label: "复制路径", danger: false, accel: "Ctrl+Shift+C", action: onCopyPath });
+    }
     if (single) items.push({ key: "rename", label: "重命名", danger: false, action: onRename });
+    if (single && single.is_dir) items.push({ key: "dissolve", label: "解散文件夹", danger: false, action: onDissolve });
     items.push({
       key: "delete",
       label: `删除${paths.length > 1 ? ` (${paths.length})` : ""}`,
@@ -1790,7 +1882,8 @@ function ContextMenu(props: ContextMenuProps) {
             ev.currentTarget.focus({ preventScroll: true });
           }}
         >
-          {it.label}
+          <span>{it.label}</span>
+          {it.accel && <span className="ctx-accel">{it.accel}</span>}
         </div>
       ))}
     </div>

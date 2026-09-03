@@ -1,5 +1,6 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type { FileEntry } from "./types";
 
 export function listDir(path: string): Promise<FileEntry[]> {
@@ -40,6 +41,11 @@ export function deleteFile(path: string): Promise<void> {
   return invoke<void>("delete_file", { path });
 }
 
+/** 解散文件夹：子项上移到上级，删除空壳（可撤销，走 History 栈） */
+export function dissolveFolder(path: string): Promise<void> {
+  return invoke<void>("dissolve_folder", { path });
+}
+
 export function undo(): Promise<void> {
   return invoke<void>("undo");
 }
@@ -59,5 +65,24 @@ export function canRedo(): Promise<boolean> {
 /** 用系统默认应用打开文件/文件夹（tauri-plugin-opener） */
 export function openInDefault(path: string): Promise<void> {
   return openPath(path);
+}
+
+/** 写入文本到系统剪贴板（tauri-plugin-clipboard-manager） */
+export function copyText(s: string): Promise<void> {
+  return writeText(s);
+}
+
+/** 把本地文件路径转成 webview 可直接加载的 asset URL（图片/视频/PDF 用） */
+export function previewAssetUrl(path: string): string {
+  return convertFileSrc(path);
+}
+
+/** 读取文本文件前 1 MiB 用于预览面板（大文件只展示首段） */
+export function readTextPreview(
+  path: string
+): Promise<{ text: string; truncated: boolean }> {
+  return invoke<{ text: string; truncated: boolean }>("read_text_preview", {
+    path,
+  });
 }
 
