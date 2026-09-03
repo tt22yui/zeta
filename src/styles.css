@@ -15,12 +15,14 @@
   --text-2: #5a5e6e;
   --text-3: #6f7488;  /* 次级文本加深一档，浅色下 ≥4.5:1 */
 
-  /* 主色（单一强调） */
-  --accent: #5b5be0;
-  --accent-hover: #4a4acb;
-  --accent-soft: #f0f1ff;
+  /* 主色（单一强调） · color role 语义命名，对齐 MD3 role 思路 */
+  --accent: #5b5be0;             /* primary：强调色背景 */
+  --accent-hover: #4a4acb;       /* hover 态深一档 */
+  --on-accent: #ffffff;          /* on-primary：强调色上的前景（按钮文字） */
+  --accent-soft: #f0f1ff;        /* primary-container：柔和容器底 */
+  --on-accent-container: #4640c0; /* on-primary-container：柔和容器内文字 */
   --accent-soft2: #e4e6ff;
-  --accent-text: #4640c0;
+  --accent-text: #4640c0;        /* 旧名兼容，= on-accent-container */
 
   /* 类型/标签色板（同饱和度，统一观感） */
   --tc-1: #5b5be0;
@@ -32,16 +34,25 @@
 
   --danger: #d9484a;
 
-  /* 几何 */
+  /* 几何 · 圆角 6 档刻度（对齐 MD3 shape scale） */
   --r-xs: 4px;
   --r-sm: 6px;
-  --r: 8px;
+  --r-md: 8px;              /* 语义别名 = --r，新代码用 md */
+  --r: 8px;                 /* 默认圆角，向后兼容 */
   --r-lg: 10px;
+  --r-xl: 16px;             /* 大卡片/对话框 */
+  --r-full: 999px;          /* 胶囊/圆形 */
   --ctl: 30px;              /* 控件统一高度 */
   --icn: 28px;              /* 图标按钮 */
 
+  /* 状态层 · 半透明叠加（对齐 MD3 state layer：8/12/16%） */
+  --state-hover: rgba(0, 0, 0, 0.08);
+  --state-focus: rgba(0, 0, 0, 0.12);
+  --state-pressed: rgba(0, 0, 0, 0.16);
+
   --font: "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui,
     -apple-system, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, monospace;
 
   color: var(--text);
   font-family: var(--font);
@@ -61,9 +72,15 @@
     --text-3: #767a8a;
     --accent: #6f6fe8;
     --accent-hover: #8080ec;
+    --on-accent: #1c1d26;           /* 深色下 accent 提亮，按钮文字改深色，保持对比度 */
     --accent-soft: #24244a;
+    --on-accent-container: #c6c3ff;  /* 柔和容器内文字提亮 */
     --accent-soft2: #2d2d5c;
     --accent-text: #c6c3ff;
+    /* 状态层 · 深色下叠加白色半透明 */
+    --state-hover: rgba(255, 255, 255, 0.08);
+    --state-focus: rgba(255, 255, 255, 0.12);
+    --state-pressed: rgba(255, 255, 255, 0.16);
     /* 标签色板深色变体：整体提亮降饱和，避免深底刺眼 */
     --tc-1: #8686f2;
     --tc-2: #52b6f2;
@@ -223,8 +240,9 @@ input { font: inherit; user-select: text; }
   font-weight: 600;
   transition: background 120ms ease, box-shadow 120ms ease;
 }
-.btn.primary { background: var(--accent); color: #fff; }
+.btn.primary { background: var(--accent); color: var(--on-accent); }
 .btn.primary:hover { background: var(--accent-hover); }
+.btn.primary:active { background: var(--accent); box-shadow: inset 0 0 0 999px var(--state-pressed); }
 .btn.primary:focus-visible { box-shadow: 0 0 0 3px var(--accent-soft2); }
 
 /* 键盘焦点统一为强调色描边（可访问性） */
@@ -647,8 +665,9 @@ input { font: inherit; user-select: text; }
 .search-clear { display: inline-flex; color: var(--text-3); border-radius: 4px; transition: color 120ms ease; }
 .search-clear:hover { color: var(--text); }
 
-/* 窄窗：收起盘符（地址栏仍可输入盘符）、压缩筛选框，避免工具栏互相挤压 */
-@media (max-width: 880px) {
+/* 自适应断点（对齐 MD3 规范）：600 紧凑 / 840 中等 / 1240 展开
+   现有窄窗逻辑用中等断点 840，后续新增布局按此三档规划 */
+@media (max-width: 840px) {
   .drive-select { display: none; }
   .search-wrap { width: 132px; }
   .search-wrap:focus-within { width: 172px; }
@@ -821,6 +840,8 @@ button.col.sorted { color: var(--accent-text); }
 .ctx-item {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 24px;
   padding: 7px 10px;
   border-radius: var(--r-sm);
   color: var(--text);
@@ -833,8 +854,149 @@ button.col.sorted { color: var(--accent-text); }
 .ctx-item.focused { background: var(--surface-3); }
 .ctx-item.ctx-delete { color: var(--danger); }
 .ctx-item.ctx-delete:hover { background: rgba(217, 72, 74, 0.1); }
+.ctx-accel {
+  margin-left: auto;
+  font-size: 11px;
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+}
 .ctx-sep {
   height: 1px;
   margin: 4px 6px;
   background: var(--border);
+}
+
+/* ---------- 空格预览面板（右侧抽屉） ---------- */
+.preview-pane {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: clamp(360px, 38vw, 560px);
+  z-index: 900;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.08);
+  animation: preview-in 180ms ease-out;
+}
+@keyframes preview-in {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .preview-pane { animation: none; }
+}
+.preview-pane-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.preview-title {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.preview-close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  outline: none;
+  transition: background 90ms ease, color 90ms ease;
+}
+.preview-close:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.preview-body {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  background: var(--surface);
+}
+.preview-media {
+  display: block;
+  max-width: 100%;
+}
+.preview-img {
+  margin: 12px auto;
+  object-fit: contain;
+  max-height: calc(100vh - 80px);
+}
+.preview-pdf {
+  width: 100%;
+  height: calc(100vh - 48px);
+  border: none;
+}
+.preview-text {
+  margin: 0;
+  padding: 12px 14px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+.preview-truncated {
+  display: block;
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+  color: var(--text-3);
+  font-size: 11px;
+  text-align: center;
+}
+.preview-loading,
+.preview-fallback {
+  padding: 16px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+.preview-meta-row {
+  display: flex;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.preview-meta-row:last-of-type {
+  border-bottom: none;
+}
+.preview-label {
+  flex: none;
+  width: 72px;
+  color: var(--text-3);
+}
+.preview-value {
+  flex: 1;
+  color: var(--text);
+  word-break: break-all;
+}
+.preview-hint {
+  margin-top: 16px;
+  padding: 12px;
+  text-align: center;
+  color: var(--text-3);
+  font-size: 12px;
+  background: var(--surface-2);
+  border-radius: var(--r-sm);
 }

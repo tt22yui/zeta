@@ -20,17 +20,21 @@ extern "system" {
     ) -> i32;
 }
 
-/// 一次重命名操作，用于撤销/重做。
+/// 一次可撤销的操作。
+/// Rename = 单次移动/改名；DissolveFolder = 解散文件夹（多步移动 + 删空壳，整体撤销/重做）。
 #[derive(Clone)]
-struct RenameOp {
-    from: String,
-    to: String,
+enum HistoryOp {
+    Rename { from: String, to: String },
+    DissolveFolder {
+        folder: String,
+        moved: Vec<(String, String)>, // (原路径 folder/child, 新路径 parent/child)
+    },
 }
 
 /// 撤销/重做栈。
 struct History {
-    undo: Mutex<Vec<RenameOp>>,
-    redo: Mutex<Vec<RenameOp>>,
+    undo: Mutex<Vec<HistoryOp>>,
+    redo: Mutex<Vec<HistoryOp>>,
 }
 
 impl History {
@@ -41,25 +45,25 @@ impl History {
         }
     }
 
-    /// 记录一次改名：压入撤销栈，并清空重做栈（新操作使重做失效）。
-    fn record(&self, op: RenameOp) {
+    /// 记录一次操作：压入撤销栈，并清空重做栈（新操作使重做失效）。
+    fn record(&self, op: HistoryOp) {
         self.undo.lock().unwrap().push(op);
         self.redo.lock().unwrap().clear();
     }
 
-    fn push_undo(&self, op: RenameOp) {
+    fn push_undo(&self, op: HistoryOp) {
         self.undo.lock().unwrap().push(op);
     }
 
-    fn pop_undo(&self) -> Option<RenameOp> {
+    fn pop_undo(&self) -> Option<HistoryOp> {
         self.undo.lock().unwrap().pop()
     }
 
-    fn push_redo(&self, op: RenameOp) {
+    fn push_redo(&self, op: HistoryOp) {
         self.redo.lock().unwrap().push(op);
     }
 
-    fn pop_redo(&self) -> Option<RenameOp> {
+    fn pop_redo(&self) -> Option<HistoryOp> {
         self.redo.lock().unwrap().pop()
     }
 
@@ -308,7 +312,7 @@ fn do_rename(state: &History, from: &str, to: &str) -> Result<(), String> {
         return Err(format!("目标文件名已存在：{}", to));
     }
     fs::rename(from, to).map_err(|e| e.to_string())?;
-    state.record(RenameOp {
+    state.record(HistoryOp::Rename {
         from: from.to_string(),
         to: to.to_string(),
     });
@@ -370,31 +374,66 @@ fn remove_tag(path: String, tag: String, state: State<History>) -> Result<String
     Ok(new_path)
 }
 
-/// 撤销上一步改名。
+/// 撤销上一步操作。
 #[tauri::command(async)]
 fn undo(state: State<History>) -> Result<(), String> {
     let op = state
         .pop_undo()
         .ok_or_else(|| "没有可撤销的操作".to_string())?;
-    if Path::new(&op.from).exists() {
-        return Err(format!("无法撤销：源文件已不存在：{}", op.from));
+    match op {
+        HistoryOp::Rename { from, to } => {
+            if Path::new(&from).exists() {
+                return Err(format!("无法撤销：源文件已存在：{}", from));
+            }
+            fs::rename(&to, &from).map_err(|e| e.to_string())?;
+            state.push_redo(HistoryOp::Rename { from, to });
+        }
+        HistoryOp::DissolveFolder { folder, moved } => {
+            // 撤销 = 重建文件夹 + 把子项从 parent 移回 folder
+            if Path::new(&folder).exists() {
+                return Err(format!("无法撤销：文件夹仍存在：{}", folder));
+            }
+            fs::create_dir(&folder).map_err(|e| e.to_string())?;
+            for (from, to) in &moved {
+                // from = folder/child（原）, to = parent/child（现）
+                fs::rename(to, from).map_err(|e| e.to_string())?;
+            }
+            state.push_redo(HistoryOp::DissolveFolder { folder, moved });
+        }
     }
-    fs::rename(&op.to, &op.from).map_err(|e| e.to_string())?;
-    state.push_redo(op);
     Ok(())
 }
 
-/// 重做被撤销的改名。
+/// 重做被撤销的操作。
 #[tauri::command(async)]
 fn redo(state: State<History>) -> Result<(), String> {
     let op = state
         .pop_redo()
         .ok_or_else(|| "没有可重做的操作".to_string())?;
-    if Path::new(&op.to).exists() {
-        return Err(format!("无法重做：目标文件已存在：{}", op.to));
+    match op {
+        HistoryOp::Rename { from, to } => {
+            if Path::new(&to).exists() {
+                return Err(format!("无法重做：目标文件已存在：{}", to));
+            }
+            fs::rename(&from, &to).map_err(|e| e.to_string())?;
+            state.push_undo(HistoryOp::Rename { from, to });
+        }
+        HistoryOp::DissolveFolder { folder, moved } => {
+            // 重做 = 重新移动子项 + 删空壳
+            if !Path::new(&folder).exists() {
+                return Err(format!("无法重做：文件夹不存在：{}", folder));
+            }
+            for (from, to) in &moved {
+                // from = folder/child（原）, to = parent/child（现）
+                if Path::new(to).exists() {
+                    return Err(format!("无法重做：目标已存在：{}", to));
+                }
+                fs::rename(from, to).map_err(|e| e.to_string())?;
+            }
+            fs::remove_dir(&folder).map_err(|e| e.to_string())?;
+            state.push_undo(HistoryOp::DissolveFolder { folder, moved });
+        }
     }
-    fs::rename(&op.from, &op.to).map_err(|e| e.to_string())?;
-    state.push_undo(op);
     Ok(())
 }
 
@@ -406,6 +445,101 @@ fn can_undo(state: State<History>) -> bool {
 #[tauri::command(async)]
 fn can_redo(state: State<History>) -> bool {
     state.can_redo()
+}
+
+/// 解散文件夹纯逻辑：把 folder 内直接子项移到其父目录，删除空壳。
+/// 同名冲突按"保留双方+序号"处理（参照资源管理器）。
+/// 返回所有移动记录 (原路径 folder/child, 新路径 parent/child) 供撤销使用。
+/// 纯逻辑：可独立单元测试（不依赖 Tauri 运行时）。
+fn dissolve_folder_inner(folder: &Path) -> Result<Vec<(String, String)>, String> {
+    if !folder.is_dir() {
+        return Err("目标不是文件夹".to_string());
+    }
+    let parent = folder
+        .parent()
+        .ok_or_else(|| "无法解散根目录".to_string())?;
+
+    let mut moved = Vec::new();
+    for entry in fs::read_dir(folder).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let child_path = entry.path();
+        let child_name = entry.file_name().to_string_lossy().to_string();
+        let mut target = parent.join(&child_name);
+        // 同名冲突：按 "名字 (n).ext" 递增（参照资源管理器"保留双方"）
+        if target.exists() {
+            let stem = Path::new(&child_name)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| child_name.clone());
+            let ext = Path::new(&child_name)
+                .extension()
+                .map(|s| format!(".{}", s.to_string_lossy()))
+                .unwrap_or_default();
+            let mut n = 2;
+            loop {
+                let candidate = parent.join(format!("{} ({}){}", stem, n, ext));
+                if !candidate.exists() {
+                    target = candidate;
+                    break;
+                }
+                n += 1;
+            }
+        }
+        fs::rename(&child_path, &target).map_err(|e| e.to_string())?;
+        moved.push((
+            child_path.to_string_lossy().to_string(),
+            target.to_string_lossy().to_string(),
+        ));
+    }
+
+    // 删除空壳（仅空目录，不走回收站，以便撤销时直接 create_dir 重建）
+    fs::remove_dir(folder).map_err(|e| e.to_string())?;
+    Ok(moved)
+}
+
+/// 解散文件夹：子项上移到上级，删除空壳（可撤销）。
+#[tauri::command(async)]
+fn dissolve_folder(path: String, state: State<History>) -> Result<(), String> {
+    let folder = Path::new(&path);
+    let moved = dissolve_folder_inner(folder)?;
+    state.record(HistoryOp::DissolveFolder {
+        folder: path,
+        moved,
+    });
+    Ok(())
+}
+
+/// 文本预览结果：截断后的文本 + 是否被截断
+#[derive(Serialize)]
+struct TextPreview {
+    text: String,
+    truncated: bool,
+}
+
+/// 读取文本文件前 `max_bytes` 字节用于预览。超出则截断并标记 truncated。
+/// 纯逻辑：可独立单元测试（不依赖 Tauri 运行时）。
+fn read_text_preview_inner(path: &Path, max_bytes: u64) -> Result<TextPreview, String> {
+    let meta = fs::metadata(path).map_err(|e| e.to_string())?;
+    let len = meta.len();
+    let cap = len.min(max_bytes);
+    let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; cap as usize];
+    use std::io::Read;
+    if cap > 0 {
+        file.read_exact(&mut buf).map_err(|e| e.to_string())?;
+    }
+    // UTF-8 失败时降级为 lossy 解码，保证不丢字节、不报错给前端
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    Ok(TextPreview {
+        text,
+        truncated: len > max_bytes,
+    })
+}
+
+/// 读取文本文件前 1 MiB 用于预览面板。大文件只展示首段，避免内存爆涨。
+#[tauri::command(async)]
+async fn read_text_preview(path: String) -> Result<TextPreview, String> {
+    read_text_preview_inner(Path::new(&path), 1 << 20)
 }
 
 fn sibling_path(parent_file: &str, new_file_name: &str) -> String {
@@ -453,6 +587,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(History::new())
         .invoke_handler(tauri::generate_handler![
             list_dir,
@@ -467,7 +602,9 @@ pub fn run() {
             undo,
             redo,
             can_undo,
-            can_redo
+            can_redo,
+            dissolve_folder,
+            read_text_preview
         ])
         // 启动期窗口逻辑：按显示器缩放(物理像素)与工作区分辨率将窗口居中；
         // 若窗口任一维度超过可用工作区则自动最大化，避免窗口被截断
@@ -626,17 +763,20 @@ mod tests {
         h.record(rename_op("b.txt", "c.txt"));
 
         let back = h.pop_undo().unwrap();
-        assert_eq!(back.from, "b.txt");
-        assert_eq!(back.to, "c.txt");
+        let (f, t) = as_rename(&back).expect("Rename");
+        assert_eq!(f, "b.txt");
+        assert_eq!(t, "c.txt");
         h.push_redo(back);
 
         let first = h.pop_undo().unwrap();
-        assert_eq!(first.from, "a.txt");
-        assert_eq!(first.to, "b.txt");
+        let (f, t) = as_rename(&first).expect("Rename");
+        assert_eq!(f, "a.txt");
+        assert_eq!(t, "b.txt");
 
         let forwards = h.pop_redo().unwrap();
-        assert_eq!(forwards.from, "b.txt");
-        assert_eq!(forwards.to, "c.txt");
+        let (f, t) = as_rename(&forwards).expect("Rename");
+        assert_eq!(f, "b.txt");
+        assert_eq!(t, "c.txt");
     }
 
     #[test]
@@ -648,10 +788,121 @@ mod tests {
         assert!(h.pop_redo().is_none());
     }
 
-    fn rename_op(from: &str, to: &str) -> RenameOp {
-        RenameOp {
+    #[test]
+    fn read_text_preview_full_small_file() {
+        let path = std::env::temp_dir().join("zeta_preview_small.txt");
+        std::fs::write(&path, "hello preview").unwrap();
+        let p = read_text_preview_inner(&path, 1024).unwrap();
+        assert_eq!(p.text, "hello preview");
+        assert!(!p.truncated);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn read_text_preview_truncates_large_file() {
+        let path = std::env::temp_dir().join("zeta_preview_large.txt");
+        let content: Vec<u8> = (0..100).map(|i| b'a' + (i % 26) as u8).collect();
+        std::fs::write(&path, &content).unwrap();
+        let p = read_text_preview_inner(&path, 30).unwrap();
+        assert_eq!(p.text.len(), 30);
+        assert_eq!(p.text.as_bytes(), &content[..30]);
+        assert!(p.truncated);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn read_text_preview_empty_file() {
+        let path = std::env::temp_dir().join("zeta_preview_empty.txt");
+        std::fs::write(&path, "").unwrap();
+        let p = read_text_preview_inner(&path, 1024).unwrap();
+        assert_eq!(p.text, "");
+        assert!(!p.truncated);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn read_text_preview_missing_file_errors() {
+        let path = std::env::temp_dir().join("zeta_nonexistent_subdir_xyz").join("file.txt");
+        let r = read_text_preview_inner(&path, 1024);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn dissolve_folder_moves_children_and_removes_shell() {
+        let root = std::env::temp_dir().join("zeta_dissolve_basic");
+        let _ = std::fs::remove_dir_all(&root);
+        let folder = root.join("outer");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("a.txt"), "a").unwrap();
+        std::fs::write(folder.join("b.md"), "b").unwrap();
+
+        let moved = dissolve_folder_inner(&folder).unwrap();
+        assert_eq!(moved.len(), 2);
+        // 子项已上移到 root
+        assert!(root.join("a.txt").exists());
+        assert!(root.join("b.md").exists());
+        // 空壳删除
+        assert!(!folder.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dissolve_folder_collision_appends_suffix() {
+        let root = std::env::temp_dir().join("zeta_dissolve_collision");
+        let _ = std::fs::remove_dir_all(&root);
+        let folder = root.join("outer");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("dup.txt"), "in_folder").unwrap();
+        std::fs::write(root.join("dup.txt"), "in_parent").unwrap(); // 上级已有同名
+
+        let moved = dissolve_folder_inner(&folder).unwrap();
+        assert_eq!(moved.len(), 1);
+        // 原上级文件保留，文件夹内同名项改名 " (2)"
+        assert!(root.join("dup.txt").exists());
+        assert!(root.join("dup (2).txt").exists());
+        assert!(!folder.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dissolve_folder_rejects_non_dir() {
+        let root = std::env::temp_dir().join("zeta_dissolve_notdir");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("file.txt");
+        std::fs::write(&file, "x").unwrap();
+        let r = dissolve_folder_inner(&file);
+        assert!(r.is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn history_records_dissolve_as_single_op() {
+        let h = History::new();
+        h.record(HistoryOp::DissolveFolder {
+            folder: "/tmp/outer".to_string(),
+            moved: vec![
+                ("/tmp/outer/a.txt".to_string(), "/tmp/a.txt".to_string()),
+            ],
+        });
+        assert!(h.can_undo());
+        assert!(!h.can_redo());
+        let op = h.pop_undo().unwrap();
+        assert!(matches!(op, HistoryOp::DissolveFolder { .. }));
+    }
+
+    fn rename_op(from: &str, to: &str) -> HistoryOp {
+        HistoryOp::Rename {
             from: from.to_string(),
             to: to.to_string(),
+        }
+    }
+
+    /// 解包 Rename 变体取 (from, to)；非 Rename 返回 None。
+    fn as_rename(op: &HistoryOp) -> Option<(&str, &str)> {
+        match op {
+            HistoryOp::Rename { from, to } => Some((from, to)),
+            _ => None,
         }
     }
 }
