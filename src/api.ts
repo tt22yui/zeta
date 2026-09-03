@@ -46,6 +46,11 @@ export function dissolveFolder(path: string): Promise<void> {
   return invoke<void>("dissolve_folder", { path });
 }
 
+/** 收入文件夹：新建文件夹并把选中项移入（可撤销，走 History 栈）。返回新建 folder 路径。 */
+export function collectIntoFolder(items: string[], folderName: string): Promise<string> {
+  return invoke<string>("collect_into_folder", { items, folderName });
+}
+
 export function undo(): Promise<void> {
   return invoke<void>("undo");
 }

@@ -5,6 +5,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { watchImmediate } from "@tauri-apps/plugin-fs";
 import {
   addTag,
+  collectIntoFolder,
   copyText,
   deleteFile,
   dissolveFolder,
@@ -33,6 +34,7 @@ import {
   IconTag,
 } from "./icons";
 import PreviewPane from "./PreviewPane";
+import { ConfirmDialog, PromptDialog } from "./Dialog";
 
 const win = getCurrentWindow();
 const isMac = typeof navigator !== "undefined" && /Mac|Macintosh/i.test(navigator.userAgent);
@@ -142,6 +144,12 @@ export default function App() {
   const driveWrapRef = useRef<HTMLDivElement | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  // 集中式弹窗编排：null=不弹；kind="confirm" 确认框 / "prompt" 输入框（替代原生 confirm/prompt）
+  const [dialog, setDialog] = useState<
+    | { kind: "confirm"; title: string; message: string; danger?: boolean; confirmLabel?: string; action: () => void }
+    | { kind: "prompt"; title: string; label: string; defaultValue?: string; action: (value: string) => void }
+    | null
+  >(null);
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
@@ -934,11 +942,11 @@ export default function App() {
           break;
         case "ArrowLeft":
           ev.preventDefault();
-          goUp();
+          goBack();
           break;
         case "ArrowRight":
           ev.preventDefault();
-          openItem(visibleEntries[i]);
+          goForward();
           break;
         case "Enter":
           ev.preventDefault();
@@ -958,6 +966,8 @@ export default function App() {
       pageStep,
       openItem,
       goUp,
+      goBack,
+      goForward,
       focusRow,
     ]
   );
@@ -1021,17 +1031,24 @@ export default function App() {
         if (selected.size > 0) {
           ev.preventDefault();
           const paths = [...selected];
-          if (window.confirm(`将 ${paths.length} 项移动到回收站？`)) {
-            void (async () => {
-              selfOpAt.current = Date.now();
-              try {
-                for (const p of paths) await deleteFile(p);
-                await reload();
-              } catch (e) {
-                setError(String(e));
-              }
-            })();
-          }
+          setDialog({
+            kind: "confirm",
+            title: "删除",
+            message: `将 ${paths.length} 项移动到回收站？`,
+            danger: true,
+            confirmLabel: "删除",
+            action: () => {
+              void (async () => {
+                selfOpAt.current = Date.now();
+                try {
+                  for (const p of paths) await deleteFile(p);
+                  await reload();
+                } catch (e) {
+                  setError(String(e));
+                }
+              })();
+            },
+          });
         }
         return;
       }
@@ -1146,15 +1163,15 @@ export default function App() {
       {/* 顶部工具栏 */}
       <header className="topbar">
         <div className="nav-btns">
-          <button className="icon-btn" disabled={histIdx <= 0} onClick={goBack} title="后退 (Alt+←)" aria-label="后退 (Alt+←)">
+          <button className="icon-btn" disabled={histIdx <= 0} onClick={goBack} title="后退 (←)" aria-label="后退 (←)">
             <IconArrowLeft size={16} />
           </button>
           <button
             className="icon-btn"
             disabled={histIdx >= hist.length - 1}
             onClick={goForward}
-            title="前进 (Alt+→)"
-            aria-label="前进 (Alt+→)"
+            title="前进 (→)"
+            aria-label="前进 (→)"
           >
             <IconArrowRight size={16} />
           </button>
@@ -1629,35 +1646,80 @@ export default function App() {
           }}
           onDelete={() => {
             if (!ctxMenu.paths.length) return;
-            const n = ctxMenu.paths.length;
-            if (window.confirm(`将 ${n} 项移动到回收站？`)) {
-              void (async () => {
-                selfOpAt.current = Date.now();
-                try {
-                  for (const p of ctxMenu.paths) await deleteFile(p);
-                  closeCtxMenu();
-                  await reload();
-                } catch (e) {
-                  setError(String(e));
-                }
-              })();
-            }
+            const paths = [...ctxMenu.paths];
+            const n = paths.length;
+            closeCtxMenu();
+            setDialog({
+              kind: "confirm",
+              title: "删除",
+              message: `将 ${n} 项移动到回收站？`,
+              danger: true,
+              confirmLabel: "删除",
+              action: () => {
+                void (async () => {
+                  selfOpAt.current = Date.now();
+                  try {
+                    for (const p of paths) await deleteFile(p);
+                    await reload();
+                  } catch (e) {
+                    setError(String(e));
+                  }
+                })();
+              },
+            });
           }}
           onDissolve={() => {
             const single = ctxMenu.single;
             if (!single || !single.is_dir) return;
-            if (window.confirm(`解散文件夹「${single.name}」？\n内部子项将上移到当前目录，空壳删除。可用 Ctrl+Z 撤销。`)) {
-              void (async () => {
-                selfOpAt.current = Date.now();
-                try {
-                  await dissolveFolder(single.path);
-                  closeCtxMenu();
-                  await reload();
-                } catch (e) {
-                  setError(String(e));
-                }
-              })();
-            }
+            const s = single;
+            closeCtxMenu();
+            setDialog({
+              kind: "confirm",
+              title: "解散文件夹",
+              message: `解散文件夹「${s.name}」？\n内部子项将上移到当前目录，空壳删除。可用 Ctrl+Z 撤销。`,
+              confirmLabel: "解散",
+              action: () => {
+                void (async () => {
+                  selfOpAt.current = Date.now();
+                  try {
+                    await dissolveFolder(s.path);
+                    await reload();
+                  } catch (e) {
+                    setError(String(e));
+                  }
+                })();
+              },
+            });
+          }}
+          onCollect={() => {
+            const paths = ctxMenu.paths;
+            if (!paths.length) return;
+            closeCtxMenu();
+            setDialog({
+              kind: "prompt",
+              title: "收入到文件夹",
+              label: "文件夹名",
+              defaultValue: "新建文件夹",
+              action: (name) => {
+                const trimmed = name.trim();
+                void (async () => {
+                  selfOpAt.current = Date.now();
+                  try {
+                    const folderPath = await collectIntoFolder(paths, trimmed);
+                    await reload();
+                    // reload 后闭包 visibleEntries 是旧值，直接 listDir 拿最新列表做下标计算
+                    const fresh = await listDir(path);
+                    const i = fresh.findIndex((e) => e.path === folderPath);
+                    if (i >= 0) {
+                      setCursor(i);
+                      selectOnly(i);
+                    }
+                  } catch (e) {
+                    setError(String(e));
+                  }
+                })();
+              },
+            });
           }}
           onClearTags={() => {
             if (!ctxMenu.paths.length) return;
@@ -1681,6 +1743,38 @@ export default function App() {
 
       {/* 空格预览面板：右侧抽屉式浮层 */}
       <PreviewPane entry={previewEntry} onClose={() => setPreviewPath(null)} />
+
+      {/* 集中式弹窗：确认框（原生 confirm 替代） */}
+      {dialog?.kind === "confirm" && (
+        <ConfirmDialog
+          open
+          title={dialog.title}
+          message={dialog.message}
+          danger={dialog.danger}
+          confirmLabel={dialog.confirmLabel}
+          onConfirm={() => {
+            const a = dialog.action;
+            setDialog(null);
+            a();
+          }}
+          onCancel={() => setDialog(null)}
+        />
+      )}
+      {/* 集中式弹窗：输入框（原生 prompt 替代） */}
+      {dialog?.kind === "prompt" && (
+        <PromptDialog
+          open
+          title={dialog.title}
+          label={dialog.label}
+          defaultValue={dialog.defaultValue}
+          onConfirm={(v) => {
+            const a = dialog.action;
+            setDialog(null);
+            a(v);
+          }}
+          onCancel={() => setDialog(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1740,6 +1834,7 @@ type ContextMenuProps = {
   onCopyName: () => void;
   onCopyPath: () => void;
   onDissolve: () => void;
+  onCollect: () => void;
 };
 
 /**
@@ -1748,7 +1843,7 @@ type ContextMenuProps = {
  * 并按实际尺寸 clamp 到视口内，避免右下角溢出。
  */
 function ContextMenu(props: ContextMenuProps) {
-  const { x, y, paths, single, onClose, onRefresh, onOpenEntry, onRename, onDelete, onClearTags, onCopyName, onCopyPath, onDissolve } = props;
+  const { x, y, paths, single, onClose, onRefresh, onOpenEntry, onRename, onDelete, onClearTags, onCopyName, onCopyPath, onDissolve, onCollect } = props;
   const menuRef = useRef<HTMLDivElement | null>(null);
   const itemRefs = useRef<(HTMLDivElement | null)[]>([]);
 
@@ -1772,6 +1867,8 @@ function ContextMenu(props: ContextMenuProps) {
     }
     if (single) items.push({ key: "rename", label: "重命名", danger: false, action: onRename });
     if (single && single.is_dir) items.push({ key: "dissolve", label: "解散文件夹", danger: false, action: onDissolve });
+    // 收入文件夹：单选或多选都可用，须有至少一项选中
+    items.push({ key: "collect", label: "收入到文件夹", danger: false, action: onCollect });
     items.push({
       key: "delete",
       label: `删除${paths.length > 1 ? ` (${paths.length})` : ""}`,
