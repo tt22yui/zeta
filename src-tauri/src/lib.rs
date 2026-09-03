@@ -21,13 +21,19 @@ extern "system" {
 }
 
 /// 一次可撤销的操作。
-/// Rename = 单次移动/改名；DissolveFolder = 解散文件夹（多步移动 + 删空壳，整体撤销/重做）。
+/// Rename = 单次移动/改名；
+/// DissolveFolder = 解散文件夹（多步移动 + 删空壳，整体撤销/重做）；
+/// CollectFolder = 收入文件夹（新建文件夹 + 多步移入，整体撤销/重做，是 DissolveFolder 的反向）。
 #[derive(Clone)]
 enum HistoryOp {
     Rename { from: String, to: String },
     DissolveFolder {
         folder: String,
         moved: Vec<(String, String)>, // (原路径 folder/child, 新路径 parent/child)
+    },
+    CollectFolder {
+        folder: String,
+        moved: Vec<(String, String)>, // (原路径 parent/item, 新路径 folder/item)
     },
 }
 
@@ -400,6 +406,18 @@ fn undo(state: State<History>) -> Result<(), String> {
             }
             state.push_redo(HistoryOp::DissolveFolder { folder, moved });
         }
+        HistoryOp::CollectFolder { folder, moved } => {
+            // 撤销 = 把子项从 folder 移回原位 + 删空壳
+            if !Path::new(&folder).exists() {
+                return Err(format!("无法撤销：文件夹不存在：{}", folder));
+            }
+            for (from, to) in &moved {
+                // from = parent/item（原）, to = folder/item（现）
+                fs::rename(to, from).map_err(|e| e.to_string())?;
+            }
+            fs::remove_dir(&folder).map_err(|e| e.to_string())?;
+            state.push_redo(HistoryOp::CollectFolder { folder, moved });
+        }
     }
     Ok(())
 }
@@ -432,6 +450,21 @@ fn redo(state: State<History>) -> Result<(), String> {
             }
             fs::remove_dir(&folder).map_err(|e| e.to_string())?;
             state.push_undo(HistoryOp::DissolveFolder { folder, moved });
+        }
+        HistoryOp::CollectFolder { folder, moved } => {
+            // 重做 = 重建文件夹 + 重新把子项移入
+            if Path::new(&folder).exists() {
+                return Err(format!("无法重做：文件夹已存在：{}", folder));
+            }
+            fs::create_dir(&folder).map_err(|e| e.to_string())?;
+            for (from, to) in &moved {
+                // from = parent/item（原）, to = folder/item（现）
+                if Path::new(to).exists() {
+                    return Err(format!("无法重做：目标已存在：{}", to));
+                }
+                fs::rename(from, to).map_err(|e| e.to_string())?;
+            }
+            state.push_undo(HistoryOp::CollectFolder { folder, moved });
         }
     }
     Ok(())
@@ -507,6 +540,81 @@ fn dissolve_folder(path: String, state: State<History>) -> Result<(), String> {
         moved,
     });
     Ok(())
+}
+
+/// 收入文件夹纯逻辑：在 items 同级目录新建 folder_name 文件夹，把每个 item 移入。
+/// 同名冲突按 "folder_name (n)" 递增（参照资源管理器"保留双方"）。
+/// 约束：所有 items 必须在同一目录，否则报错。
+/// 返回 (新建 folder 路径, 移动记录 (原路径 parent/item, 新路径 folder/item)) 供撤销使用。
+/// 纯逻辑：可独立单元测试（不依赖 Tauri 运行时）。
+fn collect_into_folder_inner(
+    items: &[String],
+    folder_name: &str,
+) -> Result<(String, Vec<(String, String)>), String> {
+    if items.is_empty() {
+        return Err("未选中任何项".to_string());
+    }
+    let first = Path::new(&items[0]);
+    let parent = first
+        .parent()
+        .ok_or_else(|| "无法在根目录收集".to_string())?;
+    // 校验所有 items 同一 parent，避免跨目录收集
+    for s in items {
+        if Path::new(s).parent() != Some(parent) {
+            return Err("选中项须在同一目录".to_string());
+        }
+    }
+
+    // 目标 folder 路径：已存在则按 "name (n)" 递增（文件夹无扩展名分支）
+    let mut target = parent.join(folder_name);
+    if target.exists() {
+        let mut n = 2;
+        loop {
+            let candidate = parent.join(format!("{} ({})", folder_name, n));
+            if !candidate.exists() {
+                target = candidate;
+                break;
+            }
+            n += 1;
+        }
+    }
+    let folder = target.to_string_lossy().to_string();
+    fs::create_dir(&target).map_err(|e| e.to_string())?;
+
+    // 逐项移入；folder 刚创建为空，子项不会同名冲突
+    let mut moved = Vec::with_capacity(items.len());
+    for s in items {
+        let src = Path::new(s);
+        let name = src
+            .file_name()
+            .ok_or_else(|| "路径无文件名".to_string())?
+            .to_string_lossy()
+            .to_string();
+        let dst = target.join(&name);
+        fs::rename(src, &dst).map_err(|e| e.to_string())?;
+        moved.push((
+            src.to_string_lossy().to_string(),
+            dst.to_string_lossy().to_string(),
+        ));
+    }
+
+    Ok((folder, moved))
+}
+
+/// 收入文件夹：新建文件夹并把选中项移入（可撤销，走 History 栈）。
+/// 返回新建 folder 路径，供前端选中。
+#[tauri::command(async)]
+fn collect_into_folder(
+    items: Vec<String>,
+    folder_name: String,
+    state: State<History>,
+) -> Result<String, String> {
+    let (folder, moved) = collect_into_folder_inner(&items, &folder_name)?;
+    state.record(HistoryOp::CollectFolder {
+        folder: folder.clone(),
+        moved,
+    });
+    Ok(folder)
 }
 
 /// 文本预览结果：截断后的文本 + 是否被截断
@@ -604,6 +712,7 @@ pub fn run() {
             can_undo,
             can_redo,
             dissolve_folder,
+            collect_into_folder,
             read_text_preview
         ])
         // 启动期窗口逻辑：按显示器缩放(物理像素)与工作区分辨率将窗口居中；
@@ -889,6 +998,109 @@ mod tests {
         assert!(!h.can_redo());
         let op = h.pop_undo().unwrap();
         assert!(matches!(op, HistoryOp::DissolveFolder { .. }));
+    }
+
+    #[test]
+    fn collect_into_folder_moves_items_into_new_folder() {
+        let root = std::env::temp_dir().join("zeta_collect_basic");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let a = root.join("a.txt");
+        let b = root.join("b.md");
+        let sub = root.join("sub");
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&b, "b").unwrap();
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let items = vec![
+            a.to_string_lossy().to_string(),
+            b.to_string_lossy().to_string(),
+            sub.to_string_lossy().to_string(),
+        ];
+        let (folder, moved) = collect_into_folder_inner(&items, "newfolder").unwrap();
+        let folder_path = std::path::Path::new(&folder);
+        // 新建 folder 存在
+        assert!(folder_path.is_dir());
+        // 三项已移入 folder
+        assert!(folder_path.join("a.txt").exists());
+        assert!(folder_path.join("b.md").exists());
+        assert!(folder_path.join("sub").is_dir());
+        // 原位消失
+        assert!(!a.exists());
+        assert!(!b.exists());
+        assert!(!sub.exists());
+        assert_eq!(moved.len(), 3);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn collect_into_folder_appends_suffix_on_name_collision() {
+        let root = std::env::temp_dir().join("zeta_collect_collision");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // parent 已有同名 folder
+        std::fs::create_dir_all(root.join("newfolder")).unwrap();
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+
+        let items = vec![root.join("a.txt").to_string_lossy().to_string()];
+        let (folder, moved) = collect_into_folder_inner(&items, "newfolder").unwrap();
+        // 冲突加序号 → "newfolder (2)"
+        assert_eq!(
+            std::path::Path::new(&folder)
+                .file_name()
+                .unwrap()
+                .to_string_lossy(),
+            "newfolder (2)"
+        );
+        assert_eq!(moved.len(), 1);
+        // 原有 folder 保留
+        assert!(root.join("newfolder").is_dir());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn collect_into_folder_rejects_cross_dir_items() {
+        let root = std::env::temp_dir().join("zeta_collect_crossdir");
+        let _ = std::fs::remove_dir_all(&root);
+        let dir_a = root.join("dir_a");
+        let dir_b = root.join("dir_b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        std::fs::write(dir_a.join("a.txt"), "a").unwrap();
+        std::fs::write(dir_b.join("b.txt"), "b").unwrap();
+
+        let items = vec![
+            dir_a.join("a.txt").to_string_lossy().to_string(),
+            dir_b.join("b.txt").to_string_lossy().to_string(),
+        ];
+        let r = collect_into_folder_inner(&items, "newfolder");
+        assert!(r.is_err());
+        // 失败时不产生副作用
+        assert!(dir_a.join("a.txt").exists());
+        assert!(dir_b.join("b.txt").exists());
+        assert!(!dir_a.join("newfolder").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn collect_into_folder_rejects_empty_items() {
+        let r = collect_into_folder_inner(&[], "newfolder");
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn history_records_collect_as_single_op() {
+        let h = History::new();
+        h.record(HistoryOp::CollectFolder {
+            folder: "/tmp/newfolder".to_string(),
+            moved: vec![
+                ("/tmp/a.txt".to_string(), "/tmp/newfolder/a.txt".to_string()),
+            ],
+        });
+        assert!(h.can_undo());
+        assert!(!h.can_redo());
+        let op = h.pop_undo().unwrap();
+        assert!(matches!(op, HistoryOp::CollectFolder { .. }));
     }
 
     fn rename_op(from: &str, to: &str) -> HistoryOp {

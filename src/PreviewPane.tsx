@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import type { ReactNode } from "react";
+import { Transition } from "@headlessui/react";
 import type { FileEntry } from "./types";
 import { previewAssetUrl, readTextPreview } from "./api";
 import { IconClose } from "./icons";
@@ -37,6 +38,7 @@ type PreviewPaneProps = {
 
 /**
  * 空格预览面板：右侧抽屉式浮层。
+ * 基于 headlessui Dialog（非模态，不禁用列表交互）+ Transition 动画。
  * 按扩展名分发：图片/视频/音频/PDF 走 asset 协议直链，文本走后端 read_text_preview
  * （截断到 1 MiB），其他格式显示文件元信息 + 「无法预览此格式」。
  */
@@ -71,71 +73,84 @@ export default function PreviewPane({ entry, onClose }: PreviewPaneProps) {
     };
   }, [entry]);
 
-  if (!entry) return null;
+  // body 内容：仅当 entry 非 null 时计算
+  let body: ReactNode = null;
+  if (entry) {
+    const ext = entry.ext.toLowerCase();
+    const url = previewAssetUrl(entry.path);
 
-  const ext = entry.ext.toLowerCase();
-  const url = previewAssetUrl(entry.path);
-
-  let body: ReactNode;
-  if (error) {
-    body = <div className="preview-fallback">无法加载：{error}</div>;
-  } else if (IMG_EXT.includes(ext)) {
-    body = <img className="preview-media preview-img" src={url} alt={entry.name} />;
-  } else if (VIDEO_EXT.includes(ext)) {
-    body = <video className="preview-media" src={url} controls />;
-  } else if (AUDIO_EXT.includes(ext)) {
-    body = <audio className="preview-media" src={url} controls />;
-  } else if (PDF_EXT.includes(ext)) {
-    body = <iframe className="preview-media preview-pdf" src={url} title={entry.name} />;
-  } else if (TEXT_EXT.includes(ext)) {
-    body = loading ? (
-      <div className="preview-loading">加载中…</div>
-    ) : textContent ? (
-      <pre className="preview-text">
-        {textContent.text}
-        {textContent.truncated && (
-          <span className="preview-truncated">{"\n\n（仅显示前 1 MiB）"}</span>
-        )}
-      </pre>
-    ) : null;
-  } else {
-    body = (
-      <div className="preview-fallback">
-        <div className="preview-meta-row">
-          <span className="preview-label">名称</span>
-          <span className="preview-value">{entry.name}</span>
+    if (error) {
+      body = <div className="preview-fallback">无法加载：{error}</div>;
+    } else if (IMG_EXT.includes(ext)) {
+      body = <img className="preview-media preview-img" src={url} alt={entry.name} />;
+    } else if (VIDEO_EXT.includes(ext)) {
+      body = <video className="preview-media" src={url} controls />;
+    } else if (AUDIO_EXT.includes(ext)) {
+      body = <audio className="preview-media" src={url} controls />;
+    } else if (PDF_EXT.includes(ext)) {
+      body = <iframe className="preview-media preview-pdf" src={url} title={entry.name} />;
+    } else if (TEXT_EXT.includes(ext)) {
+      body = loading ? (
+        <div className="preview-loading">加载中…</div>
+      ) : textContent ? (
+        <pre className="preview-text">
+          {textContent.text}
+          {textContent.truncated && (
+            <span className="preview-truncated">{"\n\n（仅显示前 1 MiB）"}</span>
+          )}
+        </pre>
+      ) : null;
+    } else {
+      body = (
+        <div className="preview-fallback">
+          <div className="preview-meta-row">
+            <span className="preview-label">名称</span>
+            <span className="preview-value">{entry.name}</span>
+          </div>
+          <div className="preview-meta-row">
+            <span className="preview-label">大小</span>
+            <span className="preview-value">{formatSize(entry.size)}</span>
+          </div>
+          <div className="preview-meta-row">
+            <span className="preview-label">修改时间</span>
+            <span className="preview-value">{formatTime(entry.modified)}</span>
+          </div>
+          <div className="preview-meta-row">
+            <span className="preview-label">类型</span>
+            <span className="preview-value">{entry.ext ? `.${entry.ext}` : "未知"}</span>
+          </div>
+          <div className="preview-hint">无法预览此格式</div>
         </div>
-        <div className="preview-meta-row">
-          <span className="preview-label">大小</span>
-          <span className="preview-value">{formatSize(entry.size)}</span>
-        </div>
-        <div className="preview-meta-row">
-          <span className="preview-label">修改时间</span>
-          <span className="preview-value">{formatTime(entry.modified)}</span>
-        </div>
-        <div className="preview-meta-row">
-          <span className="preview-label">类型</span>
-          <span className="preview-value">{entry.ext ? `.${entry.ext}` : "未知"}</span>
-        </div>
-        <div className="preview-hint">无法预览此格式</div>
-      </div>
-    );
+      );
+    }
   }
 
   return (
-    <aside className="preview-pane" role="complementary" aria-label="文件预览">
-      <header className="preview-pane-header">
-        <span className="preview-title" title={entry.name}>{entry.name}</span>
-        <button
-          className="preview-close"
-          onClick={onClose}
-          aria-label="关闭预览 (Esc)"
-          title="关闭预览 (Esc)"
-        >
-          <IconClose />
-        </button>
-      </header>
-      <div className="preview-body">{body}</div>
-    </aside>
+    <Transition
+      appear
+      show={!!entry}
+      as={Fragment}
+      enter="zeta-preview-enter"
+      enterFrom="zeta-preview-enter-from"
+      enterTo="zeta-preview-enter-to"
+      leave="zeta-preview-leave"
+      leaveFrom="zeta-preview-leave-from"
+      leaveTo="zeta-preview-leave-to"
+    >
+      <aside className="preview-pane" role="complementary" aria-label="文件预览">
+        <header className="preview-pane-header">
+          <span className="preview-title" title={entry?.name ?? ""}>{entry?.name ?? ""}</span>
+          <button
+            className="preview-close"
+            onClick={onClose}
+            aria-label="关闭预览 (Esc)"
+            title="关闭预览 (Esc)"
+          >
+            <IconClose />
+          </button>
+        </header>
+        <div className="preview-body">{body}</div>
+      </aside>
+    </Transition>
   );
 }
