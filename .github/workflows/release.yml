@@ -18,11 +18,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS 产 dmg；Windows 只产 exe 并压缩成 ZIP（无需 NSIS）
+          # macOS 产 Apple Silicon (M1/M2/M3) dmg
           - {
               platform: macos-latest,
-              bundle_args: "",
-              release_files: "src-tauri/target/release/bundle/dmg/*.dmg",
+              rust_target: "aarch64-apple-darwin",
+              bundle_args: "-- --target aarch64-apple-darwin",
+              release_files: "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg",
             }
           - {
               platform: windows-latest,
@@ -44,6 +45,8 @@ jobs:
 
       - name: 安装 Rust（stable）
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target || '' }}
 
       - name: Rust 依赖缓存
         uses: swatinem/rust-cache@v2
