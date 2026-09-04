@@ -199,6 +199,10 @@ export default function App() {
   const rowRefs = useRef<(HTMLDivElement | null)[]>([]);
   // Shift 范围多选的锚点行下标
   const anchor = useRef(-1);
+  // 记录「从哪个父目录进入了哪个子目录」，返回上级时据此恢复光标停留
+  const lastEnterRef = useRef<{ parent: string; childPath: string } | null>(null);
+  // 待聚焦的子目录项，列表加载到位后将其设为光标与选中（用于返回上级后恢复）
+  const [pendingFocus, setPendingFocus] = useState<string | null>(null);
   // 列表滚动容器（用于 PageUp/PageDown 翻页步长）
   const bodyRef = useRef<HTMLDivElement | null>(null);
   // 类型定位（打字跳转）缓冲
@@ -389,6 +393,12 @@ export default function App() {
       next.push(result.path);
       setHist(next);
       setHistIdx(next.length - 1);
+      // 若这次是「回到最近一次进入过的父目录」，返回上级后把光标恢复在该子目录上
+      const enter = lastEnterRef.current;
+      if (enter && result.path === enter.parent) {
+        setPendingFocus(enter.childPath);
+        lastEnterRef.current = null;
+      }
     },
     [hist, histIdx, loadDir]
   );
@@ -914,10 +924,12 @@ export default function App() {
 
   const openItem = useCallback(
     (entry: FileEntry) => {
-      if (entry.is_dir) navigate(entry.path);
-      else openInDefault(entry.path).catch((e) => setError(String(e)));
+      if (entry.is_dir) {
+        lastEnterRef.current = { parent: path, childPath: entry.path };
+        navigate(entry.path);
+      } else openInDefault(entry.path).catch((e) => setError(String(e)));
     },
-    [navigate]
+    [navigate, path]
   );
 
   // visibleEntries 变化时钳制光标落在有效范围内
@@ -946,6 +958,15 @@ export default function App() {
     },
     [visibleEntries, focusRow]
   );
+
+  // 返回上级后恢复光标：在加载完成的列表里定位最近进入的那个子目录
+  useEffect(() => {
+    if (!pendingFocus) return;
+    const i = visibleEntries.findIndex((e) => e.path === pendingFocus);
+    if (i < 0) return; // 列表还没加载到位，等下次 visibleEntries 变化再试
+    selectOnly(i);
+    setPendingFocus(null);
+  }, [pendingFocus, visibleEntries, selectOnly]);
 
   // 选中 [a,b] 之间的连续行；merge 为 true 时并入现有选中（用于 Shift）
   const setRange = useCallback(
