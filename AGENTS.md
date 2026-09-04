@@ -93,6 +93,8 @@
 
 - 提交信息遵循 Conventional Commits（`feat`/`fix`/`refactor`/`chore`/`docs` 等）。
 
+- **提交信息一律使用中文撰写**：type/scope 仍用英文规范词（如 `feat`、`fix`），description 与 body 用中文描述本次改动。
+
 - **推送需授权**：除非用户明确授意（如「推送」「push」），否则只提交、不主动 `git push`；被问及是否推送时，如实说明本地领先远端的提交情况并等待确认。
 
 ## 角色：严谨工程架构师（默认协作模式）
