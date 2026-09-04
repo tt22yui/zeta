@@ -335,9 +335,22 @@ export default function App() {
   }, [path, settings.addrHistLimit]);
 
   useEffect(() => {
-    getDrives()
-      .then(setDrives)
-      .catch(() => setDrives([]));
+    // 启动早期后端/IPC 可能尚未就绪，get_drives 一次失败就永久为空会让
+    // 盘符下拉不可用；这里失败自动重试，直到拿到盘符或达到上限
+    let stop = false;
+    const loadDrives = async () => {
+      for (let i = 0; i < 6; i++) {
+        try {
+          const d = await getDrives();
+          if (!stop) setDrives(d);
+          if (d.length > 0) return;
+        } catch {
+          /* 后端未就绪，稍后重试 */
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    };
+    void loadDrives();
     // 优先恢复上次访问的路径（受设置开关控制），否则回到默认目录
     let remembered: string | null = null;
     if (settings.restoreLastPath) {
