@@ -620,16 +620,6 @@ export default function App() {
     [previewPath, visibleEntries]
   );
 
-  // 预览打开期间，selected 变化时把 previewPath 同步到首个选中项，
-  // 便于在预览面板打开时用 ↑↓ 切换文件、预览内容跟随更新
-  useEffect(() => {
-    if (!previewPath) return;
-    const first = visibleEntries.find((e) => selected.has(e.path));
-    if (first && !first.is_dir && first.path !== previewPath) {
-      setPreviewPath(first.path);
-    }
-  }, [selected, visibleEntries, previewPath]);
-
   const folders = entries.filter((e) => e.is_dir).length;
   const files = entries.length - folders;
 
@@ -1057,14 +1047,6 @@ export default function App() {
         case "PageUp":
           move(i - pageStep());
           break;
-        case "ArrowLeft":
-          ev.preventDefault();
-          goBack();
-          break;
-        case "ArrowRight":
-          ev.preventDefault();
-          goForward();
-          break;
         case "Enter":
           ev.preventDefault();
           openItem(visibleEntries[i]);
@@ -1083,8 +1065,6 @@ export default function App() {
       pageStep,
       openItem,
       goUp,
-      goBack,
-      goForward,
       focusRow,
     ]
   );
@@ -1198,7 +1178,7 @@ export default function App() {
       if (cursor >= 0) return;
       if (visibleEntries.length === 0) return;
       if (
-        ["ArrowDown", "ArrowRight", "End", "PageDown", "ArrowUp", "Home", "PageUp"].includes(
+        ["ArrowDown", "End", "PageDown", "ArrowUp", "Home", "PageUp"].includes(
           ev.key
         )
       ) {
@@ -1208,6 +1188,36 @@ export default function App() {
     },
     [cursor, visibleEntries, selectOnly]
   );
+
+  // 键盘导航（window 级捕获监听，焦点在窗口内非输入框处一律生效）：
+  // 裸 ←=返回上一层 · 裸 →=进入当前选中项 · Alt+←=后退 · Alt+→=前进。
+  // 与列表内的 ↑↓ 移动选中互不干扰；输入框内不拦截，保留光标编辑。
+  useEffect(() => {
+    const onKey = (ev: KeyboardEvent) => {
+      const { altKey, key } = ev;
+      if (key !== "ArrowLeft" && key !== "ArrowRight") return;
+      const t = ev.target as HTMLElement | null;
+      if (t && t.closest("input, textarea, [contenteditable='true']")) return;
+      if (altKey && key === "ArrowLeft") {
+        ev.preventDefault();
+        goBack();
+      } else if (altKey && key === "ArrowRight") {
+        ev.preventDefault();
+        goForward();
+      } else if (!altKey && key === "ArrowLeft") {
+        ev.preventDefault();
+        void goUp();
+      } else if (!altKey && key === "ArrowRight") {
+        ev.preventDefault();
+        if (cursor >= 0) openItem(visibleEntries[cursor]);
+      } else {
+        return;
+      }
+      ev.stopImmediatePropagation();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [goBack, goForward, goUp, openItem, cursor, visibleEntries]);
 
   return (
     <div
@@ -1280,15 +1290,15 @@ export default function App() {
       {/* 顶部工具栏 */}
       <header className="topbar">
         <div className="nav-btns">
-          <button className="icon-btn" disabled={histIdx <= 0} onClick={goBack} title="后退 (←)" aria-label="后退 (←)">
+          <button className="icon-btn" disabled={histIdx <= 0} onClick={goBack} title="后退 (Alt+←)" aria-label="后退 (Alt+←)">
             <IconArrowLeft size={16} />
           </button>
           <button
             className="icon-btn"
             disabled={histIdx >= hist.length - 1}
             onClick={goForward}
-            title="前进 (→)"
-            aria-label="前进 (→)"
+            title="前进 (Alt+→)"
+            aria-label="前进 (Alt+→)"
           >
             <IconArrowRight size={16} />
           </button>
@@ -1737,7 +1747,7 @@ export default function App() {
         {selected.size > 0 && <span className="vsep" />}
         <span>{folders} 个文件夹 · {files} 个文件</span>
         <span className="spacer" />
-        <span className="hint">单击选中 · Shift 范围多选 · Ctrl+A 全选 · Enter 打开 · ← 上级 · F2 重命名 · Delete 删除 · F5 刷新 · 输入字符定位</span>
+        <span className="hint">单击选中 · ↑↓/Home/End 移动选中 · Shift 范围多选 · Enter/→ 打开 · Backspace/← 上级 · Alt+←/→ 后退/前进 · F2 重命名 · Delete 删除 · F5 刷新 · 输入字符定位</span>
       </footer>
 
       {/* 自定义右键菜单 */}
