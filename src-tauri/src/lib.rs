@@ -95,10 +95,35 @@ struct FileEntry {
     modified: u64,  // 修改时间（Unix 秒）
 }
 
-/// 约定：文件名中从第一个 `#` 开始，每个 `#xxx` 段都是一个标签。
-/// base 为第一个 `#` 之前的部分（去掉扩展名）。
-fn parse_tags(file_stem: &str) -> (String, Vec<String>) {
-    let parts: Vec<&str> = file_stem.split('#').collect();
+/// Windows 上不允许出现在文件名中的字符；分隔符校验时排除，避免打标签产生非法文件名。
+const SEP_FORBIDDEN: [char; 9] = ['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
+
+/// 校验并规范化标签分隔符：返回首个合法字符；空/空白/非法字符序列则返回 None。
+/// 纯逻辑：可独立单元测试。
+fn sanitize_sep(input: &str) -> Option<char> {
+    input
+        .chars()
+        .find(|c| !c.is_whitespace() && !SEP_FORBIDDEN.contains(c))
+}
+
+/// 标签分隔符配置（内存态）。持久化由前端 `zeta.settings` 负责；
+/// 应用启动后由前端 `set_tag_separator` 命令同步，默认 `#`。
+struct TagSettings {
+    sep: Mutex<char>,
+}
+
+impl TagSettings {
+    fn new() -> Self {
+        Self {
+            sep: Mutex::new('#'),
+        }
+    }
+}
+
+/// 约定：文件名中从第一个 `sep` 开始，每个 `sep`xxx` 段都是一个标签。
+/// base 为第一个 `sep` 之前的部分（去掉扩展名）。
+fn parse_tags(file_stem: &str, sep: char) -> (String, Vec<String>) {
+    let parts: Vec<&str> = file_stem.split(sep).collect();
     if parts.is_empty() {
         return (String::new(), Vec::new());
     }
@@ -162,7 +187,8 @@ fn is_system_file(meta: &fs::Metadata, name: &str) -> bool {
 
 /// 列出某个目录下的文件与文件夹。
 #[tauri::command(async)]
-fn list_dir(path: String) -> Result<Vec<FileEntry>, String> {
+fn list_dir(path: String, tag_settings: State<TagSettings>) -> Result<Vec<FileEntry>, String> {
+    let sep = *tag_settings.sep.lock().unwrap();
     let dir = PathBuf::from(&path);
     let read = fs::read_dir(&dir).map_err(|e| e.to_string())?;
     let mut entries = Vec::new();
@@ -185,7 +211,7 @@ fn list_dir(path: String) -> Result<Vec<FileEntry>, String> {
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| name.clone());
-        let (base, tags) = parse_tags(&stem);
+        let (base, tags) = parse_tags(&stem, sep);
 
         let ext = full
             .extension()
@@ -279,13 +305,13 @@ fn get_default_dir() -> Result<String, String> {
 }
 
 /// 构造改名后的新文件名：base + 现有标签 + 新标签 + 扩展名。
-fn build_new_name(entry: &FileEntry, add_tag: &str) -> String {
+fn build_new_name(entry: &FileEntry, add_tag: &str, sep: char) -> String {
     let mut stem = entry.base.clone();
     for t in &entry.tags {
-        stem.push('#');
+        stem.push(sep);
         stem.push_str(t);
     }
-    stem.push('#');
+    stem.push(sep);
     stem.push_str(add_tag);
     if !entry.ext.is_empty() {
         stem.push('.');
@@ -295,14 +321,14 @@ fn build_new_name(entry: &FileEntry, add_tag: &str) -> String {
 }
 
 /// 移除某个标签，返回新文件名。若标签不存在则返回 None。
-fn strip_tag(entry: &FileEntry, tag: &str) -> Option<String> {
+fn strip_tag(entry: &FileEntry, tag: &str, sep: char) -> Option<String> {
     let remaining: Vec<&String> = entry.tags.iter().filter(|t| t.as_str() != tag).collect();
     if remaining.len() == entry.tags.len() {
         return None; // 该标签不在文件名中
     }
     let mut stem = entry.base.clone();
     for t in remaining {
-        stem.push('#');
+        stem.push(sep);
         stem.push_str(t);
     }
     if !entry.ext.is_empty() {
@@ -327,13 +353,19 @@ fn do_rename(state: &History, from: &str, to: &str) -> Result<(), String> {
 
 /// 给一个文件/文件夹追加标签（重命名）。
 #[tauri::command(async)]
-fn add_tag(path: String, tag: String, state: State<History>) -> Result<String, String> {
-    let sanitized: String = tag.chars().filter(|c| *c != '#').collect();
+fn add_tag(
+    path: String,
+    tag: String,
+    state: State<History>,
+    tag_settings: State<TagSettings>,
+) -> Result<String, String> {
+    let sep = *tag_settings.sep.lock().unwrap();
+    let sanitized: String = tag.chars().filter(|c| *c != sep).collect();
     if sanitized.trim().is_empty() {
         return Err("标签不能为空".to_string());
     }
-    let entry = build_entry(&path)?;
-    let new_name = build_new_name(&entry, &sanitized);
+    let entry = build_entry(&path, sep)?;
+    let new_name = build_new_name(&entry, &sanitized, sep);
     let new_path = sibling_path(&path, &new_name);
     do_rename(&state, &path, &new_path)?;
     Ok(new_path)
@@ -372,12 +404,26 @@ fn delete_file(path: String) -> Result<(), String> {
 
 /// 从文件名中移除指定标签。
 #[tauri::command(async)]
-fn remove_tag(path: String, tag: String, state: State<History>) -> Result<String, String> {
-    let entry = build_entry(&path)?;
-    let new_name = strip_tag(&entry, &tag).ok_or("该文件不包含此标签")?;
+fn remove_tag(
+    path: String,
+    tag: String,
+    state: State<History>,
+    tag_settings: State<TagSettings>,
+) -> Result<String, String> {
+    let sep = *tag_settings.sep.lock().unwrap();
+    let entry = build_entry(&path, sep)?;
+    let new_name = strip_tag(&entry, &tag, sep).ok_or("该文件不包含此标签")?;
     let new_path = sibling_path(&path, &new_name);
     do_rename(&state, &path, &new_path)?;
     Ok(new_path)
+}
+
+/// 同步标签分隔符到后端内存态。持久化由前端 `zeta.settings` 负责。
+#[tauri::command(async)]
+fn set_tag_separator(sep: String, tag_settings: State<TagSettings>) -> Result<(), String> {
+    let c = sanitize_sep(&sep).ok_or("分隔符不能为空，且不能含 Windows 文件名禁止字符")?;
+    *tag_settings.sep.lock().unwrap() = c;
+    Ok(())
 }
 
 /// 撤销上一步操作。
@@ -659,7 +705,7 @@ fn sibling_path(parent_file: &str, new_file_name: &str) -> String {
         .to_string()
 }
 
-fn build_entry(path: &str) -> Result<FileEntry, String> {
+fn build_entry(path: &str, sep: char) -> Result<FileEntry, String> {
     let p = PathBuf::from(path);
     let name = p
         .file_name()
@@ -670,7 +716,7 @@ fn build_entry(path: &str) -> Result<FileEntry, String> {
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| name.clone());
-    let (base, tags) = parse_tags(&stem);
+    let (base, tags) = parse_tags(&stem, sep);
     let ext = p
         .extension()
         .map(|s| s.to_string_lossy().to_string())
@@ -697,6 +743,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(History::new())
+        .manage(TagSettings::new())
         .invoke_handler(tauri::generate_handler![
             list_dir,
             list_subdirs,
@@ -705,6 +752,7 @@ pub fn run() {
             get_home_dir,
             add_tag,
             remove_tag,
+            set_tag_separator,
             rename_file,
             delete_file,
             undo,
@@ -801,53 +849,84 @@ mod tests {
 
     #[test]
     fn parse_tags_splits_stem() {
-        let (base, tags) = parse_tags("报告#工作#重要");
+        let (base, tags) = parse_tags("报告#工作#重要", '#');
         assert_eq!(base, "报告");
         assert_eq!(tags, vec!["工作", "重要"]);
     }
 
     #[test]
     fn parse_tags_no_tag_keeps_full_stem() {
-        let (base, tags) = parse_tags("README");
+        let (base, tags) = parse_tags("README", '#');
         assert_eq!(base, "README");
         assert!(tags.is_empty());
     }
 
     #[test]
     fn parse_tags_filters_empty_segments() {
-        let (base, tags) = parse_tags("文档##脏标签"); // 连续 # 的空段被过滤
+        let (base, tags) = parse_tags("文档##脏标签", '#'); // 连续 # 的空段被过滤
         assert_eq!(base, "文档");
         assert_eq!(tags, vec!["脏标签"]);
     }
 
     #[test]
+    fn parse_tags_uses_custom_separator() {
+        let (base, tags) = parse_tags("笔记@工作@重要", '@');
+        assert_eq!(base, "笔记");
+        assert_eq!(tags, vec!["工作", "重要"]);
+    }
+
+    #[test]
+    fn sanitize_sep_takes_first_legal_char() {
+        assert_eq!(sanitize_sep("  "), None);
+        assert_eq!(sanitize_sep(""), None);
+        // 跳过开首空白/非法字符，取首个合法字符
+        assert_eq!(sanitize_sep(" /#"), Some('#'));
+        // 全为非法字符时应返回 None
+        assert_eq!(sanitize_sep("/:"), None);
+        assert_eq!(sanitize_sep("@"), Some('@'));
+        assert_eq!(sanitize_sep("  @"), Some('@'));
+    }
+
+    #[test]
     fn build_new_name_appends_tag_before_ext() {
         let e = entry("报告", "md", vec!["工作"]);
-        assert_eq!(build_new_name(&e, "重要"), "报告#工作#重要.md");
+        assert_eq!(build_new_name(&e, "重要", '#'), "报告#工作#重要.md");
     }
 
     #[test]
     fn build_new_name_first_tag_no_ext() {
         let e = entry("笔记", "", vec![]);
-        assert_eq!(build_new_name(&e, "读书"), "笔记#读书");
+        assert_eq!(build_new_name(&e, "读书", '#'), "笔记#读书");
+    }
+
+    #[test]
+    fn build_new_name_uses_custom_separator() {
+        let e = entry("笔记", "md", vec!["工作"]);
+        assert_eq!(build_new_name(&e, "重要", '@'), "笔记@工作@重要.md");
     }
 
     #[test]
     fn strip_tag_removes_one_and_keeps_rest() {
         let e = entry("报告", "md", vec!["工作", "重要"]);
-        assert_eq!(strip_tag(&e, "工作"), Some("报告#重要.md".to_string()));
+        assert_eq!(strip_tag(&e, "工作", '#'), Some("报告#重要.md".to_string()));
     }
 
     #[test]
     fn strip_tag_absent_returns_none() {
         let e = entry("报告", "md", vec!["工作"]);
-        assert_eq!(strip_tag(&e, "不存在"), None);
+        assert_eq!(strip_tag(&e, "不存在", '#'), None);
     }
 
     #[test]
     fn strip_tag_last_removes_hash_and_ext_kept() {
         let e = entry("报告", "md", vec!["工作"]);
-        assert_eq!(strip_tag(&e, "工作"), Some("报告.md".to_string()));
+        assert_eq!(strip_tag(&e, "工作", '#'), Some("报告.md".to_string()));
+    }
+
+    #[test]
+    fn strip_tag_uses_custom_separator() {
+        let e = entry("笔记", "md", vec!["工作", "重要"]);
+        assert_eq!(strip_tag(&e, "工作", '@'), Some("笔记@重要.md".to_string()));
     }
 
     #[test]

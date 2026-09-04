@@ -58,38 +58,38 @@
   font-family: var(--font);
 }
 
-/* 深色模式：在浅色令牌上做整体变暗，保持同一套几何比例 */
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #14141a;
-    --surface: #1c1d26;
-    --surface-2: #181920;
-    --surface-3: #262837;
-    --border: #2c2e3d;
-    --border-strong: #3a3d4f;
-    --text: #e9eaf1;
-    --text-2: #a6a9ba;
-    --text-3: #767a8a;
-    --accent: #6f6fe8;
-    --accent-hover: #8080ec;
-    --on-accent: #1c1d26;           /* 深色下 accent 提亮，按钮文字改深色，保持对比度 */
-    --accent-soft: #24244a;
-    --on-accent-container: #c6c3ff;  /* 柔和容器内文字提亮 */
-    --accent-soft2: #2d2d5c;
-    --accent-text: #c6c3ff;
-    /* 状态层 · 深色下叠加白色半透明 */
-    --state-hover: rgba(255, 255, 255, 0.08);
-    --state-focus: rgba(255, 255, 255, 0.12);
-    --state-pressed: rgba(255, 255, 255, 0.16);
-    /* 标签色板深色变体：整体提亮降饱和，避免深底刺眼 */
-    --tc-1: #8686f2;
-    --tc-2: #52b6f2;
-    --tc-3: #47c392;
-    --tc-4: #e8b04a;
-    --tc-5: #ee71ae;
-    --tc-6: #ab86f2;
-    --text-3: #8a8fa3;
-  }
+/* 深色模式：在浅色令牌上做整体变暗，保持同一套几何比例。
+   由前端设置（applyTheme）写 <html data-theme="dark"> 触发；跟随系统也由 JS 解析后写入。 */
+html[data-theme="dark"] {
+  --bg: #14141a;
+  --surface: #1c1d26;
+  --surface-2: #181920;
+  --surface-3: #262837;
+  --border: #2c2e3d;
+  --border-strong: #3a3d4f;
+  --text: #e9eaf1;
+  --text-2: #a6a9ba;
+  --text-3: #767a8a;
+  --accent: #6f6fe8;
+  --accent-hover: #8080ec;
+  --on-accent: #1c1d26;           /* 深色下 accent 提亮，按钮文字改深色，保持对比度 */
+  --accent-soft: #24244a;
+  --on-accent-container: #c6c3ff;  /* 柔和容器内文字提亮 */
+  --accent-soft2: #2d2d5c;
+  --accent-text: #c6c3ff;
+  /* 状态层 · 深色下叠加白色半透明 */
+  --state-hover: rgba(255, 255, 255, 0.08);
+  --state-focus: rgba(255, 255, 255, 0.12);
+  --state-pressed: rgba(255, 255, 255, 0.16);
+  /* 标签色板深色变体：整体提亮降饱和，避免深底刺眼 */
+  --tc-1: #8686f2;
+  --tc-2: #52b6f2;
+  --tc-3: #47c392;
+  --tc-4: #e8b04a;
+  --tc-5: #ee71ae;
+  --tc-6: #ab86f2;
+  --text-3: #8a8fa3;
+  color-scheme: dark;
 }
 
 /* ---------- 基础 ---------- */
@@ -1078,3 +1078,99 @@ button.col.sorted { color: var(--accent-text); }
   gap: 10px;
   margin-top: 18px;
 }
+
+/* ---------- 设置面板 ---------- */
+.zeta-settings-panel {
+  display: flex;
+  flex-direction: column;
+  max-height: 82vh;
+  overflow-y: auto;
+}
+.set-group + .set-group { margin-top: 18px; }
+.set-group-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-3);
+  margin: 0 0 8px;
+}
+.set-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: var(--ctl);
+  margin-bottom: 6px;
+}
+.set-label { font-size: 13px; color: var(--text); }
+/* 主题三态分段器 */
+.theme-seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--surface-3);
+  border-radius: var(--r-full);
+}
+.theme-seg-item {
+  border: none;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1;
+  padding: 5px 10px;
+  border-radius: var(--r-full);
+  cursor: pointer;
+}
+.theme-seg-item.selected {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.14);
+}
+.set-input {
+  width: 72px;
+  height: var(--ctl);
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+.set-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft2);
+}
+.set-input-sep { width: 56px; text-align: center; }
+/* 开关（role=switch 按钮） */
+.set-toggle {
+  width: 36px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-full);
+  background: var(--border-strong);
+  position: relative;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.set-toggle.on { background: var(--accent); }
+.set-toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #ffffff; /* 滑块固定白色中性，与强调色轨道对比 */
+  transition: transform 0.15s ease;
+}
+.set-toggle.on .set-toggle-thumb { transform: translateX(16px); }
+.set-hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-3);
+  margin: 2px 0 0;
+}
+.settings-btn { margin-left: 6px; }

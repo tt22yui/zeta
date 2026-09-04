@@ -17,6 +17,7 @@ import {
   openInDefault,
   removeTag,
   renameFile,
+  setTagSeparator,
 } from "./api";
 import type { FileEntry } from "./types";
 import {
@@ -30,11 +31,20 @@ import {
   IconRedo,
   IconRestore,
   IconSearch,
+  IconSettings,
   IconSortArrow,
   IconTag,
 } from "./icons";
 import PreviewPane from "./PreviewPane";
 import { ConfirmDialog, PromptDialog } from "./Dialog";
+import { SettingsDialog } from "./SettingsDialog";
+import {
+  applyTheme,
+  loadSettings,
+  saveSettings,
+  watchSystemTheme,
+} from "./settings";
+import type { Settings } from "./settings";
 
 const win = getCurrentWindow();
 const isMac = typeof navigator !== "undefined" && /Mac|Macintosh/i.test(navigator.userAgent);
@@ -167,6 +177,9 @@ export default function App() {
   } | null>(null);
   // 空格预览面板：当前预览的文件路径；null 表示面板关闭
   const [previewPath, setPreviewPath] = useState<string | null>(null);
+  // 设置：单键 JSON（zeta.settings）持久化，集中管理
+  const [settings, setSettings] = useState<Settings>(loadSettings);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // 键盘导航：光标行下标（列表内 roving tabindex）+ 行 DOM 引用
   const [cursor, setCursor] = useState(-1);
@@ -256,11 +269,11 @@ export default function App() {
     }
   }, []);
 
-  // 记录访问历史：path 变化时置顶去重，最多保留 30 条，持久化到 localStorage
+  // 记录访问历史：path 变化时置顶去重，最多保留 settings.addrHistLimit 条，持久化到 localStorage
   useEffect(() => {
     if (!path) return;
     setAddrHist((prev) => {
-      const next = [path, ...prev.filter((p) => p !== path)].slice(0, 30);
+      const next = [path, ...prev.filter((p) => p !== path)].slice(0, settings.addrHistLimit);
       try {
         localStorage.setItem("zeta.addrHist", JSON.stringify(next));
       } catch {
@@ -268,18 +281,20 @@ export default function App() {
       }
       return next;
     });
-  }, [path]);
+  }, [path, settings.addrHistLimit]);
 
   useEffect(() => {
     getDrives()
       .then(setDrives)
       .catch(() => setDrives([]));
-    // 优先恢复上次访问的路径，否则回到默认目录
+    // 优先恢复上次访问的路径（受设置开关控制），否则回到默认目录
     let remembered: string | null = null;
-    try {
-      remembered = window.localStorage.getItem("zeta.lastPath");
-    } catch {
-      /* 存储不可用时忽略 */
+    if (settings.restoreLastPath) {
+      try {
+        remembered = window.localStorage.getItem("zeta.lastPath");
+      } catch {
+        /* 存储不可用时忽略 */
+      }
     }
     const start = (dir: string) => {
       setHist([dir]);
@@ -291,7 +306,29 @@ export default function App() {
     } else {
       getDefaultDir().then(start);
     }
-  }, [loadDir]);
+  }, [loadDir, settings.restoreLastPath]);
+
+  // 主题落地 + system 模式跟随系统深浅色变化
+  useEffect(() => {
+    applyTheme(settings.theme);
+    const unsub = watchSystemTheme(() => {
+      if (settings.theme === "system") applyTheme("system");
+    });
+    return unsub;
+  }, [settings.theme]);
+
+  // 启动与变更时把标签分隔符同步到后端内存态（持久化由 zeta.settings 负责）
+  useEffect(() => {
+    void setTagSeparator(settings.tagSeparator).catch(() => {});
+  }, [settings.tagSeparator]);
+
+  const updateSettings = useCallback((patch: Partial<Settings>) => {
+    setSettings((prev) => {
+      const next = { ...prev, ...patch };
+      saveSettings(next);
+      return next;
+    });
+  }, []);
 
   const navigate = useCallback(
     async (dir: string) => {
@@ -1381,6 +1418,9 @@ export default function App() {
             </button>
           )}
         </div>
+        <button className="icon-btn settings-btn" onClick={() => setSettingsOpen(true)} title="设置" aria-label="设置">
+          <IconSettings size={16} />
+        </button>
       </header>
 
       {error && (
@@ -1775,6 +1815,12 @@ export default function App() {
           onCancel={() => setDialog(null)}
         />
       )}
+      <SettingsDialog
+        open={settingsOpen}
+        settings={settings}
+        onChange={updateSettings}
+        onClose={() => setSettingsOpen(false)}
+      />
     </div>
   );
 }
