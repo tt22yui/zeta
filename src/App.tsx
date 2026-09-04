@@ -7,7 +7,6 @@ import {
   addTag,
   collectIntoFolder,
   copyText,
-  deleteFile,
   dissolveFolder,
   getDefaultDir,
   getDrives,
@@ -1124,31 +1123,6 @@ export default function App() {
         reload();
         return;
       }
-      if (ev.key === "Delete" && !ctrl && !ev.shiftKey) {
-        if (selected.size > 0) {
-          ev.preventDefault();
-          const paths = [...selected];
-          setDialog({
-            kind: "confirm",
-            title: "删除",
-            message: `将 ${paths.length} 项移动到回收站？`,
-            danger: true,
-            confirmLabel: "删除",
-            action: () => {
-              void (async () => {
-                selfOpAt.current = Date.now();
-                try {
-                  for (const p of paths) await deleteFile(p);
-                  await reload();
-                } catch (e) {
-                  setError(String(e));
-                }
-              })();
-            },
-          });
-        }
-        return;
-      }
       // 打字定位：在列表上输入字符，按名称前缀（不区分大小写）跳转
       if (!ctrl && !ev.altKey && ev.key.length === 1) {
         window.clearTimeout(typeTimer.current);
@@ -1190,7 +1164,7 @@ export default function App() {
   );
 
   // 键盘导航（window 级捕获监听，焦点在窗口内非输入框处一律生效）：
-  // 裸 ←=返回上一层 · 裸 →=进入当前选中项 · Alt+←=后退 · Alt+→=前进。
+  // 裸 ←=返回上一层 · 裸 →=进入当前选中项。
   // 与列表内的 ↑↓ 移动选中互不干扰；输入框内不拦截，保留光标编辑。
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
@@ -1198,16 +1172,11 @@ export default function App() {
       if (key !== "ArrowLeft" && key !== "ArrowRight") return;
       const t = ev.target as HTMLElement | null;
       if (t && t.closest("input, textarea, [contenteditable='true']")) return;
-      if (altKey && key === "ArrowLeft") {
-        ev.preventDefault();
-        goBack();
-      } else if (altKey && key === "ArrowRight") {
-        ev.preventDefault();
-        goForward();
-      } else if (!altKey && key === "ArrowLeft") {
+      if (altKey) return;
+      if (key === "ArrowLeft") {
         ev.preventDefault();
         void goUp();
-      } else if (!altKey && key === "ArrowRight") {
+      } else if (key === "ArrowRight") {
         ev.preventDefault();
         if (cursor >= 0) openItem(visibleEntries[cursor]);
       } else {
@@ -1217,7 +1186,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [goBack, goForward, goUp, openItem, cursor, visibleEntries]);
+  }, [goUp, openItem, cursor, visibleEntries]);
 
   return (
     <div
@@ -1290,15 +1259,15 @@ export default function App() {
       {/* 顶部工具栏 */}
       <header className="topbar">
         <div className="nav-btns">
-          <button className="icon-btn" disabled={histIdx <= 0} onClick={goBack} title="后退 (Alt+←)" aria-label="后退 (Alt+←)">
+          <button className="icon-btn" disabled={histIdx <= 0} onClick={goBack} title="后退" aria-label="后退">
             <IconArrowLeft size={16} />
           </button>
           <button
             className="icon-btn"
             disabled={histIdx >= hist.length - 1}
             onClick={goForward}
-            title="前进 (Alt+→)"
-            aria-label="前进 (Alt+→)"
+            title="前进"
+            aria-label="前进"
           >
             <IconArrowRight size={16} />
           </button>
@@ -1747,7 +1716,7 @@ export default function App() {
         {selected.size > 0 && <span className="vsep" />}
         <span>{folders} 个文件夹 · {files} 个文件</span>
         <span className="spacer" />
-        <span className="hint">单击选中 · ↑↓/Home/End 移动选中 · Shift 范围多选 · Enter/→ 打开 · Backspace/← 上级 · Alt+←/→ 后退/前进 · F2 重命名 · Delete 删除 · F5 刷新 · 输入字符定位</span>
+        <span className="hint">单击选中 · ↑↓/Home/End 移动选中 · Shift 范围多选 · Enter/→ 打开 · Backspace/← 上级 · F2 重命名 · F5 刷新 · 输入字符定位</span>
       </footer>
 
       {/* 自定义右键菜单 */}
@@ -1779,30 +1748,6 @@ export default function App() {
               setRenameVal(single.name);
               setRenamingIdx(i);
             }
-          }}
-          onDelete={() => {
-            if (!ctxMenu.paths.length) return;
-            const paths = [...ctxMenu.paths];
-            const n = paths.length;
-            closeCtxMenu();
-            setDialog({
-              kind: "confirm",
-              title: "删除",
-              message: `将 ${n} 项移动到回收站？`,
-              danger: true,
-              confirmLabel: "删除",
-              action: () => {
-                void (async () => {
-                  selfOpAt.current = Date.now();
-                  try {
-                    for (const p of paths) await deleteFile(p);
-                    await reload();
-                  } catch (e) {
-                    setError(String(e));
-                  }
-                })();
-              },
-            });
           }}
           onDissolve={() => {
             const single = ctxMenu.single;
@@ -1991,7 +1936,6 @@ type ContextMenuProps = {
   onRefresh: () => void;
   onOpenEntry: () => void;
   onRename: () => void;
-  onDelete: () => void;
   onClearTags: () => void;
   onCopyName: () => void;
   onCopyPath: () => void;
@@ -2005,7 +1949,7 @@ type ContextMenuProps = {
  * 并按实际尺寸 clamp 到视口内，避免右下角溢出。
  */
 function ContextMenu(props: ContextMenuProps) {
-  const { x, y, paths, single, onClose, onRefresh, onOpenEntry, onRename, onDelete, onClearTags, onCopyName, onCopyPath, onDissolve, onCollect } = props;
+  const { x, y, paths, single, onClose, onRefresh, onOpenEntry, onRename, onClearTags, onCopyName, onCopyPath, onDissolve, onCollect } = props;
   const menuRef = useRef<HTMLDivElement | null>(null);
   const itemRefs = useRef<(HTMLDivElement | null)[]>([]);
 
@@ -2031,12 +1975,6 @@ function ContextMenu(props: ContextMenuProps) {
     if (single && single.is_dir) items.push({ key: "dissolve", label: "解散文件夹", danger: false, action: onDissolve });
     // 收入文件夹：单选或多选都可用，须有至少一项选中
     items.push({ key: "collect", label: "收入到文件夹", danger: false, action: onCollect });
-    items.push({
-      key: "delete",
-      label: `删除${paths.length > 1 ? ` (${paths.length})` : ""}`,
-      danger: true,
-      action: onDelete,
-    });
     if (showClearTags)
       items.push({ key: "cleartags", label: "移除全部标签", danger: false, action: onClearTags });
   }
