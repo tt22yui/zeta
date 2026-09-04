@@ -10,13 +10,14 @@
 
 - **演进方向**：当前右键菜单是硬编码 `items` 数组（`App.tsx:1850-1880`）。计划将菜单项抽象为**插件注册表**（每项 = 元数据 + 触发回调），支持条件显隐（单选/多选/文件夹/是否含标签）与按需启停，让「加插件」不碰核心代码。详见剩余工作第 3 项。
 
-## 计划五项
+## 计划六项
 
 1. 空格预览文件
 2. 右键功能完善：打开文件 / 复制 / 删除 / 剪切 / 复制文件名 / 复制路径
 3. 多标签浏览
 4. 收入文件夹：选中项收入一个新建文件夹
 5. 解散文件夹：文件夹内容上移到上级，删除空壳
+6. 设置功能：独立设置面板 + 持久化（见下方计划 6）
 
 ## 进度总览
 
@@ -27,6 +28,7 @@
 | 3. 多标签浏览  | ❌ 未开始   | 本轮跳过，待后续推进                             |
 | 4. 收入文件夹  | ✅ 完成    | `HistoryOp::CollectFolder` + 命名弹窗 + 撤销 |
 | 5. 解散文件夹  | ✅ 完成    | 子项上移 + 删空壳 + 撤销                        |
+| 6. 设置功能   | ✅ 完成    | 设置面板 + 主题三态 + 历史 + 标签分隔符，见下方计划 6 |
 
 ## 计划 2 明细
 
@@ -97,15 +99,31 @@
 
    - 可选：持久化显隐开关（沿用 `zeta.*` localStorage 键），用户可按需启用/隐藏某插件
 
+4. **设置功能（计划 6）** — ✅ 已完成
+
+   - 独立设置面板 `src/SettingsDialog.tsx`（@headlessui/react 居中 Dialog，走 `--tc-*` 令牌）。入口：顶部工具栏齿轮按钮。
+
+   - 持久化统一为单键 `zeta.settings`（`src/settings.ts`，宽容解析 + 默认回退）。
+
+   - 外观：主题三态（跟随系统 / 浅色 / 深色）。styles.css 深色块移入 `html[data-theme="dark"]`，index.html 首帧脚本读设置写 `data-theme` 防闪白/闪深，system 模式由 matchMedia 解析 + 监听跟随。
+
+   - 历史：地址栏历史条数上限（默认 30，范围 1~100）；启动是否恢复上次路径开关。
+
+   - 标签：标签分隔符可配置。后端标签纯函数 `parse_tags`/`build_new_name`/`strip_tag`/`build_entry` 增加 `sep: char` 参数，新增 `TagSettings` State、`set_tag_separator` 命令与 `sanitize_sep` 校验；持久化仍由前端 `zeta.settings` 负责、后端内存态随启动/变更同步。
+
+   - 插件：仅占位分组「插件管理即将推出」，待右键菜单插件注册表落地后实现按需启停。
+
+   - 本轮明确不做：预览行为开关、插件实际启停、迁移既有 `#` 标签文件（改分隔符后旧 `#` 标签不再被解析，属配置变更固有代价）。
+
 ## 验证状态
 
 - `npx tsc --noEmit`：通过
 
 - `npm run build`（tsc + vite build）：通过
 
-- `cargo test`：24 passed（含 read\_text\_preview、collect\_into\_folder、dissolve\_folder 等纯逻辑测试）
+- `cargo test`：28 passed（含 read\_text\_preview、collect\_into\_folder、dissolve\_folder、parse/build/strip 自定义分隔符、sanitize\_sep 等纯逻辑测试）
 
 - `cargo check`：通过
 
-- 手动验证待做：`npm run tauri dev` 实测——弹窗重构（Confirm/Prompt 居中、焦点、深色）、空格预览各格式抽屉动画、`←`/`→` 后退前进、打标签/删除/改名后自刷新
+- 手动验证待做：`npm run tauri dev` 实测——弹窗重构（Confirm/Prompt 居中、焦点、深色）、空格预览各格式抽屉动画、`←`/`→` 后退前进、打标签/删除/改名后自刷新、设置面板（主题三态切换、历史上限、恢复路径开关、分隔符启停）
 

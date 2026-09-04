@@ -4,13 +4,22 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Zeta</title>
-    <style>
-      /* 首帧即应用窗口底色，避免加载期白屏闪烁（与 styles.css 的 --bg 一致） */
-      html, body { background: #f6f6f8; }
-      @media (prefers-color-scheme: dark) {
-        html, body { background: #14141a; }
-      }
-    </style>
+    <script>
+      // 首帧前读取设置主题并写 <html data-theme>，避免加载期闪白/闪深。
+      // 背景色字面量与 styles.css 的 --bg 保持一致。
+      (function () {
+        var t = "system";
+        try {
+          t = (JSON.parse(localStorage.getItem("zeta.settings") || "{}").theme) || "system";
+        } catch (e) { /* 解析失败走默认 */ }
+        if (t === "system") t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        var root = document.documentElement;
+        if (t === "dark") root.setAttribute("data-theme", "dark");
+        var bg = t === "dark" ? "#14141a" : "#f6f6f8";
+        root.style.background = bg;
+        document.body.style.background = bg;
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

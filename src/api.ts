@@ -33,6 +33,11 @@ export function removeTag(path: string, tag: string): Promise<string> {
   return invoke<string>("remove_tag", { path, tag });
 }
 
+/** 同步标签分隔符到后端内存态（持久化由前端 zeta.settings 负责） */
+export function setTagSeparator(sep: string): Promise<void> {
+  return invoke<void>("set_tag_separator", { sep });
+}
+
 export function renameFile(from: string, to: string): Promise<void> {
   return invoke<void>("rename_file", { from, to });
 }
