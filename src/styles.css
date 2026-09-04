@@ -572,6 +572,32 @@ input { font: inherit; user-select: text; }
 }
 .errorbar button:hover { background: rgba(255, 255, 255, 0.32); }
 
+/* ---------- Toast 轻提示 ---------- */
+.toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  max-width: min(480px, 80vw);
+  padding: 8px 16px;
+  border-radius: var(--r);
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 13px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  animation: toast-in 160ms ease;
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translate(-50%, 6px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
 /* ---------- 主体区 ---------- */
 .content { flex: 1; display: flex; min-height: 0; }
 

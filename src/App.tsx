@@ -154,6 +154,20 @@ export default function App() {
   const driveWrapRef = useRef<HTMLDivElement | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  // Toast：短暂自动消失的轻提示（如路径失效回退）
+  const [toast, setToast] = useState<{ id: number; msg: string } | null>(null);
+  const toastTimer = useRef<number>();
+  const toastIdRef = useRef(0);
+  const toastRef = useRef<(msg: string) => void>(() => {});
+  const showToast = useCallback((msg: string) => {
+    const id = ++toastIdRef.current;
+    setToast({ id, msg });
+    window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => {
+      setToast((cur) => (cur && cur.id === id ? null : cur));
+    }, 3000);
+  }, []);
+  toastRef.current = showToast;
   // 集中式弹窗编排：null=不弹；kind="confirm" 确认框 / "prompt" 输入框（替代原生 confirm/prompt）
   const [dialog, setDialog] = useState<
     | { kind: "confirm"; title: string; message: string; danger?: boolean; confirmLabel?: string; action: () => void }
@@ -245,29 +259,63 @@ export default function App() {
     };
   }, []);
 
-  const loadDir = useCallback(async (dir: string, silent = false) => {
-    // silent 用于后台静默刷新（轮询/自动刷新/F5），不切换 loading 态，避免列表闪烁
-    if (!silent) setLoading(true);
-    setError("");
-    try {
-      const list = await listDir(dir);
-      setEntries(list);
-      setPath(dir);
-      setSelected(new Set());
-      setCursor(-1);
-      // 记住最后访问的路径，下次启动恢复
+  /**
+   * 加载目录。返回最终成功进入的 { path, list }；彻底失败（回退链全不可用）返回 null。
+   * 路径不存在时自动回退：先父目录，再默认目录（静默递归，避免层层闪烁）。
+   * silent：后台静默刷新（轮询/自动刷新/F5），不切换 loading 态。
+   * noErrorUi：不主动设置错误提示，交由调用方（轮询超时限噪）处理。
+   */
+  const loadDir = useCallback(
+    async (
+      dir: string,
+      opts: { silent?: boolean; noErrorUi?: boolean } = {}
+    ): Promise<{ path: string; list: FileEntry[] } | null> => {
+      const { silent = false, noErrorUi = false } = opts;
+      if (!silent) setLoading(true);
+      if (!noErrorUi) setError("");
       try {
-        window.localStorage.setItem("zeta.lastPath", dir);
-      } catch {
-        /* 存储不可用时忽略 */
+        const list = await listDir(dir);
+        setEntries(list);
+        setPath(dir);
+        setSelected(new Set());
+        setCursor(-1);
+        // 记住最后访问的路径，下次启动恢复
+        try {
+          window.localStorage.setItem("zeta.lastPath", dir);
+        } catch {
+          /* 存储不可用时忽略 */
+        }
+        return { path: dir, list };
+      } catch (e) {
+        if (!noErrorUi) setError(String(e));
+        // 路径失效回退：父目录可用则进入父目录，否则退回默认目录
+        const parent = parentOf(dir);
+        if (parent && parent !== dir) {
+          const r = await loadDir(parent, { silent: true, noErrorUi });
+          if (r) {
+            toastRef.current(`路径不存在，已回退到 ${parent}`);
+            return r;
+          }
+        }
+        try {
+          const def = await getDefaultDir();
+          if (def && def !== dir) {
+            const r = await loadDir(def, { silent: true, noErrorUi });
+            if (r) {
+              toastRef.current("路径不存在，已回退到默认目录");
+              return r;
+            }
+          }
+        } catch {
+          /* 默认目录不可得时忽略 */
+        }
+        return null;
+      } finally {
+        if (!silent) setLoading(false);
       }
-      return list;
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      if (!silent) setLoading(false);
-    }
-  }, []);
+    },
+    []
+  );
 
   // 记录访问历史：path 变化时置顶去重，最多保留 settings.addrHistLimit 条，持久化到 localStorage
   useEffect(() => {
@@ -297,9 +345,11 @@ export default function App() {
       }
     }
     const start = (dir: string) => {
-      setHist([dir]);
-      setHistIdx(0);
-      loadDir(dir);
+      void loadDir(dir).then((r) => {
+        // 以实际停留路径入栈（失效回退时记录回退后的目录）
+        setHist(r ? [r.path] : []);
+        setHistIdx(r ? 0 : -1);
+      });
     };
     if (remembered) {
       start(remembered);
@@ -332,12 +382,14 @@ export default function App() {
 
   const navigate = useCallback(
     async (dir: string) => {
+      setSearch("");
+      // 先加载，成功后按「实际停留路径」入栈（失效回退时记录父目录，避免历史残留失效路径）
+      const result = await loadDir(dir);
+      if (!result) return;
       const next = hist.slice(0, histIdx + 1);
-      next.push(dir);
+      next.push(result.path);
       setHist(next);
       setHistIdx(next.length - 1);
-      setSearch("");
-      await loadDir(dir);
     },
     [hist, histIdx, loadDir]
   );
@@ -345,18 +397,26 @@ export default function App() {
   const goBack = useCallback(async () => {
     if (histIdx <= 0) return;
     const idx = histIdx - 1;
-    setHistIdx(idx);
     setSearch("");
-    await loadDir(hist[idx]);
-  }, [histIdx, hist, loadDir]);
+    const result = await loadDir(hist[idx]);
+    if (!result) return; // 该历史项及其回退均失效：停留在当前视图
+    if (result.path !== hist[idx]) {
+      setHist((prev) => prev.map((p, i) => (i === idx ? result.path : p)));
+    }
+    setHistIdx(idx);
+  }, [hist, histIdx, loadDir]);
 
   const goForward = useCallback(async () => {
     if (histIdx >= hist.length - 1) return;
     const idx = histIdx + 1;
-    setHistIdx(idx);
     setSearch("");
-    await loadDir(hist[idx]);
-  }, [histIdx, hist, loadDir]);
+    const result = await loadDir(hist[idx]);
+    if (!result) return;
+    if (result.path !== hist[idx]) {
+      setHist((prev) => prev.map((p, i) => (i === idx ? result.path : p)));
+    }
+    setHistIdx(idx);
+  }, [hist, histIdx, loadDir]);
 
   const goUp = useCallback(async () => {
     const parent = parentOf(path);
@@ -639,17 +699,19 @@ export default function App() {
     return crumbs;
   }, [path]);
 
-  const reload = useCallback(async () => {
+  const reload = useCallback(async (opts: { noErrorUi?: boolean } = {}) => {
     // 记住此刻的选中集，重载后用「仍存在」的路径恢复选中，
     // 避免打标签改名后外部 watch 触发的自动刷新把选中清空。
     const prevSelected = new Set(selected);
     // silent：后台刷新不触发 loading 闪烁（轮询/自动刷新/F5 复用）
-    const list = await loadDir(path, true);
+    const result = await loadDir(path, { silent: true, noErrorUi: opts.noErrorUi });
+    const list = result?.list ?? null;
     if (prevSelected.size && list) {
       const live = new Set(list.map((e) => e.path));
       const keep = [...prevSelected].filter((p) => live.has(p));
       if (keep.length) setSelected(new Set(keep));
     }
+    return result;
   }, [path, loadDir, selected]);
 
   // 外部对当前目录的变动（增删改）自动刷新。
@@ -659,10 +721,28 @@ export default function App() {
     if (!path) return;
     const isUnc = path.startsWith("\\\\");
 
-    // UNC：定时轮询
+    // UNC：定时轮询。网络不可达时单次读取可能长时间挂起，
+    // 用 withTimeout 兜底超时；在途请求未返回则跳过本轮，避免并发堆积；
+    // 连续超时才提示一次，网络恢复后自动复位并清除提示。
     if (isUnc) {
+      const POLL_TIMEOUT_MS = 8000;
+      let inFlight = false;
+      let timeouts = 0;
       const timer = window.setInterval(() => {
-        void reload();
+        if (inFlight) return;
+        inFlight = true;
+        void withTimeout(reload({ noErrorUi: true }), POLL_TIMEOUT_MS).then((r) => {
+          inFlight = false;
+          if (r === TIMEOUT) {
+            timeouts++;
+            if (timeouts === 3) setError(`网络路径响应超时：${path}`);
+            return;
+          }
+          const stuck = timeouts >= 3;
+          timeouts = 0;
+          if (r === null) setError(`无法访问网络路径：${path}`);
+          else if (stuck) setError(""); // 超时恢复后清除提示
+        });
       }, 3000);
       return () => window.clearInterval(timer);
     }
@@ -1215,7 +1295,7 @@ export default function App() {
           <button className="icon-btn" onClick={goUp} title="上一级" aria-label="上一级" disabled={!parentOf(path)}>
             <IconArrowUp size={16} />
           </button>
-          <button className="icon-btn refresh-btn" onClick={reload} title="刷新 (F5)" aria-label="刷新">
+          <button className="icon-btn refresh-btn" onClick={() => void reload()} title="刷新 (F5)" aria-label="刷新">
             <IconRedo size={16} />
           </button>
           <div className="vsep" />
@@ -1427,6 +1507,12 @@ export default function App() {
         <div className="errorbar">
           <span>{error}</span>
           <button onClick={() => setError("")}>关闭</button>
+        </div>
+      )}
+
+      {toast && (
+        <div key={toast.id} className="toast" role="status">
+          {toast.msg}
         </div>
       )}
 
@@ -1844,6 +1930,26 @@ function FileGlyph({ entry }: { entry: FileEntry }) {
       <span className="glyph-label">{s.label}</span>
     </span>
   );
+}
+
+/** 轮询超时哨兵：网络路径读取在时限内未返回时由 withTimeout 返回 */
+const TIMEOUT = Symbol("poll-timeout");
+
+/** 竞速包装：ms 内未 settle（或失败）返回 TIMEOUT，避免网络路径挂起阻塞轮询 */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | typeof TIMEOUT> {
+  return new Promise((resolve) => {
+    const t = window.setTimeout(() => resolve(TIMEOUT), ms);
+    p.then(
+      (v) => {
+        window.clearTimeout(t);
+        resolve(v);
+      },
+      () => {
+        window.clearTimeout(t);
+        resolve(TIMEOUT);
+      }
+    );
+  });
 }
 
 function parentOf(path: string): string | null {
