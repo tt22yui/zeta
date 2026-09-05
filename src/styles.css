@@ -282,8 +282,8 @@ input { font: inherit; user-select: text; }
   outline-offset: -1px;
 }
 .row:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+  /* 焦点位置由 .focused 弱态表达，避免与选中竖线叠加成突兀蓝框 */
+  outline: none;
 }
 /* 重命名输入框：行内编辑态 */
 .rename-input {
@@ -755,6 +755,11 @@ input { font: inherit; user-select: text; }
   border-radius: 0 3px 3px 0;
   background: var(--accent);
 }
+/* 聚焦态（光标行）：仅定位光标、不强选中，弱内描边贯穿，不抢强调色。
+   与选中态（accent 竖线+填充）区分；允许多选中时焦点行=光标但非选中也可见。 */
+.row.focused:not(.selected) {
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
 
 .col { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 表头排序列 */
@@ -847,6 +852,13 @@ button.col.sorted { color: var(--accent-text); }
 }
 .statusbar .spacer { flex: 1; }
 .statusbar .hint { opacity: 0.75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 55%; }
+.statusbar .hint-long { display: inline; }
+.statusbar .hint-short { display: none; }
+@media (max-width: 840px) {
+  .statusbar .hint { max-width: 100%; }
+  .statusbar .hint-long { display: none; }
+  .statusbar .hint-short { display: inline; }
+}
 
 /* ---------- 自定义右键菜单 ---------- */
 .context-menu {
