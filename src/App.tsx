@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
@@ -24,8 +31,10 @@ import {
   IconArrowRight,
   IconArrowUp,
   IconClose,
+  IconCopy,
   IconFolder,
   IconMaximize,
+  IconOpenExternal,
   IconMinus,
   IconRedo,
   IconRestore,
@@ -215,8 +224,15 @@ export default function App() {
   // 运行时版本号（标题栏用）
   const [appVersion, setAppVersion] = useState("");
   const addrRef = useRef<HTMLInputElement | null>(null);
+  // 打标签输入框（清空按钮后需恢复焦点）
+  const tagInputRef = useRef<HTMLInputElement | null>(null);
   // 地址栏容器（用于点击外部关闭历史下拉）
   const addrWrapRef = useRef<HTMLDivElement | null>(null);
+  // 长路径自适应省略：面包屑栏实际渲染容器
+  const crumbbarRef = useRef<HTMLDivElement | null>(null);
+  // 保存最后一栏到最右端的面包屑段数（0 表示全部展示，>0 表示超出省略中间）
+  const [keepTail, setKeepTail] = useState(-1);
+  const lastPathRef = useRef<string>("");
   const renameCommitted = useRef(false);
   // 记录本应用发起的文件操作时间点：随后较短窗口内的 watch 自动刷新会被跳过，
   // 避免“操作后显式 reload + watch 防抖 reload”造成的重复加载闪烁。
@@ -710,6 +726,33 @@ export default function App() {
     }
     return crumbs;
   }, [path]);
+
+  // 长路径：面包屑自适应省略中间段。路径变化先全量展示，若溢出则逐步减少尾部保留段数，
+  // 直到恰好放得下，保证「当前目录」始终可见且不横向滚动。
+  useLayoutEffect(() => {
+    const el = crumbbarRef.current;
+    if (!el) return;
+    const n = breadcrumbs.length;
+    if (n <= 1) return;
+    if (lastPathRef.current !== path) {
+      lastPathRef.current = path;
+      setKeepTail(-1); // 重新走全量测量
+      return;
+    }
+    if (el.scrollWidth <= el.clientWidth) return; // 当前保留段数已放得下
+    setKeepTail((k) => Math.max(1, (k < 0 ? n - 1 : k) - 1));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [breadcrumbs, path, keepTail]);
+
+  // 长路径渲染：保留尾部文件夹（含当前目录），过长时从根/左侧省略直至放得下
+  const crumbN = breadcrumbs.length;
+  const crumbK = keepTail < 0 ? crumbN : Math.min(keepTail, crumbN);
+  const crumbStart = Math.max(0, crumbN - crumbK);
+  const crumbShow: ({ label: string; path: string } | null)[] = [];
+  if (crumbN > 0) {
+    if (crumbStart > 0) crumbShow.push(null); // 左侧省略：被裁掉的祖先段
+    for (let i = crumbStart; i < crumbN; i++) crumbShow.push(breadcrumbs[i]);
+  }
 
   const reload = useCallback(async (opts: { noErrorUi?: boolean } = {}) => {
     // 记住此刻的选中集，重载后用「仍存在」的路径恢复选中，
@@ -1356,25 +1399,37 @@ export default function App() {
               value={addrValue}
               onChange={(e) => setAddrValue(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") commitAddr();
-                else if (e.key === "Escape") cancelAddr();
+                if (e.key === "Enter") {
+                  if (!addrValue.trim()) {
+                    // 清空输入后回车：保持编辑态，光标留在输入框，不跳转不退出
+                    addrRef.current?.focus();
+                    e.preventDefault();
+                    return;
+                  }
+                  commitAddr();
+                } else if (e.key === "Escape") cancelAddr();
               }}
               onBlur={commitAddr}
             />
           ) : (
             <>
-              <div className="crumbbar" onClick={beginAddrEdit} title="点击编辑地址">
-                {breadcrumbs.length === 0 ? (
-                  <span className="crumb">{path || "/"}</span>
-                ) : (
-                  breadcrumbs.map((c, i) => (
+              <div className="crumbbar" ref={crumbbarRef} onClick={beginAddrEdit} title="点击编辑地址">
+                {crumbShow.map((c, i) =>
+                  c === null ? (
+                    <span className="crumb crumb-ellipsis" key="ellipsis">
+                      <span className="crumb-ellipsis-dot" aria-hidden="true">
+                        …
+                      </span>
+                      <span className="crumb-sep">{isMac ? "/" : "\\"}</span>
+                    </span>
+                  ) : (
                     <span
                       className="crumb"
                       key={i}
                       onMouseEnter={(ev) => openCrumbMenu(c.path, ev.currentTarget)}
                     >
                       <button
-                        className={i === breadcrumbs.length - 1 ? "cur" : ""}
+                        className={c.path === path ? "cur" : ""}
                         onClick={(ev) => {
                           ev.stopPropagation(); // 避免冒泡到容器的进入编辑态
                           setCrumbMenu(null);
@@ -1385,9 +1440,36 @@ export default function App() {
                       </button>
                       <span className="crumb-sep">{isMac ? "/" : "\\"}</span>
                     </span>
-                  ))
+                  )
                 )}
               </div>
+              <button
+                className="addr-edit-btn"
+                disabled={!path}
+                onClick={(ev) => {
+                  ev.stopPropagation();
+                  void copyText(path).then(
+                    () => showToast("已复制地址"),
+                    () => showToast("复制失败")
+                  );
+                }}
+                title="复制地址"
+                aria-label="复制地址"
+              >
+                <IconCopy size={14} />
+              </button>
+              <button
+                className="addr-edit-btn"
+                disabled={!path}
+                onClick={(ev) => {
+                  ev.stopPropagation();
+                  void openInDefault(path).catch(() => showToast("打开失败"));
+                }}
+                title="用系统资源管理器打开"
+                aria-label="用系统资源管理器打开"
+              >
+                <IconOpenExternal size={14} />
+              </button>
               <button
                 className={`addr-edit-btn ${histOpen ? "active" : ""}`}
                 onClick={(ev) => {
@@ -1636,6 +1718,7 @@ export default function App() {
                           onChange={(ev2) => setRenameVal(ev2.target.value)}
                           onMouseDown={(ev2) => ev2.stopPropagation()}
                           onDoubleClick={(ev2) => ev2.stopPropagation()}
+                          onClick={(ev2) => ev2.stopPropagation()}
                           onKeyDown={(ev2) => {
                             ev2.stopPropagation();
                             if (ev2.key === "Enter") {
@@ -1692,6 +1775,7 @@ export default function App() {
             <div className="tag-input-wrap">
               <IconTag size={15} />
               <input
+                ref={tagInputRef}
                 className="tag-input"
                 placeholder={selected.size > 0 ? "给选中项打标签" : "先选中文件"}
                 value={tagInput}
@@ -1701,7 +1785,11 @@ export default function App() {
               {tagInput && (
                 <button
                   className="search-clear"
-                  onClick={() => setTagInput("")}
+                  onClick={() => {
+                    setTagInput("");
+                    // 清空后焦点回到输入框，方便继续输入
+                    tagInputRef.current?.focus();
+                  }}
                   title="清空"
                   aria-label="清空标签输入"
                 >
