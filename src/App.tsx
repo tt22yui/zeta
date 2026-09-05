@@ -30,9 +30,11 @@ import {
   IconArrowLeft,
   IconArrowRight,
   IconArrowUp,
+  IconBookmark,
   IconClose,
   IconCopy,
   IconFolder,
+  IconGlobe,
   IconMaximize,
   IconOpenExternal,
   IconMinus,
@@ -41,6 +43,7 @@ import {
   IconSearch,
   IconSettings,
   IconSortArrow,
+  IconStar,
   IconTag,
 } from "./icons";
 import PreviewPane from "./PreviewPane";
@@ -164,6 +167,17 @@ export default function App() {
   // 盘符下拉
   const [driveOpen, setDriveOpen] = useState(false);
   const driveWrapRef = useRef<HTMLDivElement | null>(null);
+  // 收藏路径：持久化到 localStorage，最近加入置顶
+  const [favorites, setFavorites] = useState<string[]>(() => {
+    try {
+      const raw = JSON.parse(localStorage.getItem("zeta.favorites") ?? "[]");
+      return Array.isArray(raw) ? raw.filter((p): p is string => typeof p === "string") : [];
+    } catch {
+      return [];
+    }
+  });
+  const [favOpen, setFavOpen] = useState(false);
+  const favWrapRef = useRef<HTMLDivElement | null>(null);
   const [loading, setLoading] = useState(false);
   // 统一轻提示：单一底部 Toaster（info/success/warning 自动消失，error 常驻可手动关闭）
   const [notice, setNotice] = useState<Notice>(null);
@@ -204,6 +218,7 @@ export default function App() {
     y: number;
     paths: string[];
     single: FileEntry | null;
+    allDirs: boolean;
   } | null>(null);
   // 空格预览面板：当前预览的文件路径；null 表示面板关闭
   const [previewPath, setPreviewPath] = useState<string | null>(null);
@@ -648,6 +663,23 @@ const stepForward = useCallback(() => {
     };
   }, [driveOpen]);
 
+  // 点击收藏下拉外部或 Esc 时关闭
+  useEffect(() => {
+    if (!favOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!favWrapRef.current?.contains(e.target as Node)) setFavOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFavOpen(false);
+    };
+    window.setTimeout(() => window.addEventListener("click", onDoc), 0);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", onDoc);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [favOpen]);
+
   const tagCounts = useMemo(() => {
     const m = new Map<string, number>();
     for (const e of entries) for (const t of e.tags) m.set(t, (m.get(t) ?? 0) + 1);
@@ -687,6 +719,22 @@ const stepForward = useCallback(() => {
 
   // 当前所在的盘符（UNC 路径时无盘符）
   const currentDrive = drives.find((d) => path.startsWith(d)) ?? null;
+
+  // 当前路径是否已收藏（地址栏收藏按钮的切换态）
+  const isFavorite = favorites.includes(path);
+  /** 切换收藏：加入（置顶去重）或移除，并持久化 */
+  const toggleFavorite = useCallback((p: string) => {
+    setFavorites((prev) => {
+      const already = prev.includes(p);
+      const next = already ? prev.filter((x) => x !== p) : [p, ...prev].slice(0, 50);
+      try {
+        localStorage.setItem("zeta.favorites", JSON.stringify(next));
+      } catch {
+        /* 忽略 */
+      }
+      return next;
+    });
+  }, []);
 
   /** 切换排序：点同字段反向，切字段时大小/时间默认降序、名称默认升序 */
   const applySort = useCallback(
@@ -951,19 +999,31 @@ const stepForward = useCallback(() => {
     [reload, showNotice]
   );
 
+  // 收敛所有下拉/弹层：地址栏历史、面包屑子目录、盘符、收藏
+  const closeAllPopups = useCallback(() => {
+    setHistOpen(false);
+    setCrumbMenu(null);
+    setDriveOpen(false);
+    setFavOpen(false);
+  }, []);
+
   const closeCtxMenu = useCallback(() => setCtxMenu(null), []);
 
   // 打开右键菜单；行已被多选时作用于整个多选，否则作用于该单行
   const openCtxMenu = useCallback(
     (e: MouseEvent, entry: FileEntry, selectedKeys: Set<string>) => {
       e.preventDefault();
+      closeAllPopups();
       const inMulti =
         selectedKeys.size > 1 && selectedKeys.has(entry.path)
           ? Array.from(selectedKeys)
           : [entry.path];
-      setCtxMenu({ x: e.clientX, y: e.clientY, paths: inMulti, single: entry });
+      // 多选时「解散文件夹」仅当全部为目录才可用
+      const allDirs =
+        inMulti.length > 1 && inMulti.every((p) => entries.find((x) => x.path === p)?.is_dir);
+      setCtxMenu({ x: e.clientX, y: e.clientY, paths: inMulti, single: entry, allDirs });
     },
-    []
+    [entries, closeAllPopups]
   );
 
   // 移除目标路径的「打标签」：清空其所有标签
@@ -1266,14 +1326,29 @@ const stepForward = useCallback(() => {
   );
 
   // 键盘导航（window 级捕获监听，焦点在窗口内非输入框处一律生效）：
-  // 裸 ←=返回上一层 · 裸 →=进入当前选中项。
+  // 裸 ←=返回上一层 · 裸 →=进入当前选中项 · F2=重命名 · F5=刷新。
   // 与列表内的 ↑↓ 移动选中互不干扰；输入框内不拦截，保留光标编辑。
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
       const { altKey, key } = ev;
-      if (key !== "ArrowLeft" && key !== "ArrowRight") return;
       const t = ev.target as HTMLElement | null;
-      if (t && t.closest("input, textarea, [contenteditable='true']")) return;
+      const inInput = !!(t && t.closest("input, textarea, [contenteditable='true']"));
+      if (key === "F2") {
+        // 输入框内（改名片/地址栏/标签输入）不拦截，避免误触发重命名
+        if (inInput) return;
+        ev.preventDefault();
+        startRename();
+        ev.stopImmediatePropagation();
+        return;
+      }
+      if (key === "F5") {
+        ev.preventDefault();
+        reload();
+        ev.stopImmediatePropagation();
+        return;
+      }
+      if (key !== "ArrowLeft" && key !== "ArrowRight") return;
+      if (inInput) return;
       if (altKey) return;
       if (key === "ArrowLeft") {
         ev.preventDefault();
@@ -1290,7 +1365,7 @@ const stepForward = useCallback(() => {
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [goUp, openItem, cursor, visibleEntries, stepForward]);
+  }, [goUp, openItem, cursor, visibleEntries, stepForward, startRename, reload]);
 
   return (
     <div
@@ -1382,6 +1457,59 @@ const stepForward = useCallback(() => {
             <IconRedo size={16} />
           </button>
           <div className="vsep" />
+          <div className="fav-select" ref={favWrapRef}>
+            <button
+              className={`icon-btn fav-trigger ${favOpen ? "active" : ""}`}
+              onClick={(ev) => {
+                ev.stopPropagation();
+                setFavOpen((v) => !v);
+              }}
+              title="收藏路径"
+              aria-label="收藏路径"
+              aria-haspopup="menu"
+              aria-expanded={favOpen}
+            >
+              <IconBookmark size={16} filled={favorites.length > 0} />
+            </button>
+            {favOpen && (
+              <div className="fav-menu" role="menu" aria-label="收藏路径">
+                <div className="fav-menu-title">收藏路径</div>
+                {favorites.length === 0 ? (
+                  <div className="fav-menu-empty">暂无收藏</div>
+                ) : (
+                  favorites.map((p) => (
+                    <button
+                      key={p}
+                      role="menuitem"
+                      className={`fav-item ${p === path ? "cur" : ""}`}
+                      onClick={(ev) => {
+                        ev.stopPropagation();
+                        setFavOpen(false);
+                        if (p !== path) void navigate(p);
+                      }}
+                      title={p}
+                    >
+                      <IconFolder size={14} className="fav-item-icon" />
+                      <span className="fav-item-path">{p}</span>
+                      <span
+                        className="fav-item-del"
+                        role="button"
+                        tabIndex={-1}
+                        aria-label={`从收藏中移除 ${p}`}
+                        title="从收藏中移除"
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          toggleFavorite(p);
+                        }}
+                      >
+                        ×
+                      </span>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
           <div className="drive-select" ref={driveWrapRef}>
             <button
               className="drive-trigger"
@@ -1389,11 +1517,15 @@ const stepForward = useCallback(() => {
                 ev.stopPropagation();
                 setDriveOpen((v) => !v);
               }}
-              title={currentDrive ?? "已连接盘符"}
+              title={currentDrive ?? "网络位置（无盘符）"}
               aria-haspopup="menu"
               aria-expanded={driveOpen}
             >
-              <span>{currentDrive?.replace("\\", "") ?? "盘"}</span>
+              {currentDrive ? (
+                <span>{currentDrive.replace("\\", "")}</span>
+              ) : (
+                <IconGlobe size={16} />
+              )}
               <IconSortArrow dir="desc" size={11} className="caret" />
             </button>
             {driveOpen && (
@@ -1470,6 +1602,25 @@ const stepForward = useCallback(() => {
                   )
                 )}
               </div>
+              <button
+                className={`addr-edit-btn ${isFavorite ? "active" : ""}`}
+                disabled={!path}
+                onClick={(ev) => {
+                  ev.stopPropagation();
+                  if (isFavorite) {
+                    toggleFavorite(path);
+                    showNotice("info", "已取消收藏");
+                  } else {
+                    toggleFavorite(path);
+                    showNotice("success", "已收藏");
+                  }
+                }}
+                title={isFavorite ? "取消收藏当前路径" : "收藏当前路径"}
+                aria-label={isFavorite ? "取消收藏当前路径" : "收藏当前路径"}
+                aria-pressed={isFavorite}
+              >
+                <IconStar size={14} filled={isFavorite} />
+              </button>
               <button
                 className="addr-edit-btn"
                 disabled={!path}
@@ -1694,11 +1845,13 @@ const stepForward = useCallback(() => {
                   ev.preventDefault();
                   ev.stopPropagation();
                   const np = ev.nativeEvent;
+                  closeAllPopups();
                   setCtxMenu({
                     x: np.clientX,
                     y: np.clientY,
                     paths: [],
                     single: null,
+                    allDirs: false,
                   });
                 }}
               >
@@ -1872,6 +2025,7 @@ const stepForward = useCallback(() => {
           y={ctxMenu.y}
           paths={ctxMenu.paths}
           single={ctxMenu.single}
+          allDirs={ctxMenu.allDirs}
           onClose={closeCtxMenu}
           onRefresh={() => {
             closeCtxMenu();
@@ -1897,19 +2051,26 @@ const stepForward = useCallback(() => {
           }}
           onDissolve={() => {
             const single = ctxMenu.single;
-            if (!single || !single.is_dir) return;
-            const s = single;
+            // 多选且全为文件夹 → 逐个别解散；单选文件夹 → 单个解散
+            const dirs = ctxMenu.allDirs
+              ? ctxMenu.paths
+              : single && single.is_dir
+                ? [single.path]
+                : [];
+            if (!dirs.length) return;
+            const label =
+              dirs.length === 1 ? `「${single!.name}」` : `所选 ${dirs.length} 个文件夹`;
             closeCtxMenu();
             setDialog({
               kind: "confirm",
               title: "解散文件夹",
-              message: `解散文件夹「${s.name}」？\n内部子项将上移到当前目录，空壳删除。可用 Ctrl+Z 撤销。`,
+              message: `解散${label}？\n其内部子项将分别上移到当前目录，空壳删除。可用 Ctrl+Z 逐个撤销。`,
               confirmLabel: "解散",
               action: () => {
                 void (async () => {
                   selfOpAt.current = Date.now();
                   try {
-                    await dissolveFolder(s.path);
+                    for (const p of dirs) await dissolveFolder(p);
                     await reload();
                   } catch (e) {
                     showNotice("error", String(e));
@@ -2078,6 +2239,7 @@ type ContextMenuProps = {
   y: number;
   paths: string[];
   single: FileEntry | null;
+  allDirs: boolean;
   onClose: () => void;
   onRefresh: () => void;
   onOpenEntry: () => void;
@@ -2095,7 +2257,7 @@ type ContextMenuProps = {
  * 并按实际尺寸 clamp 到视口内，避免右下角溢出。
  */
 function ContextMenu(props: ContextMenuProps) {
-  const { x, y, paths, single, onClose, onRefresh, onOpenEntry, onRename, onClearTags, onCopyName, onCopyPath, onDissolve, onCollect } = props;
+  const { x, y, paths, single, allDirs, onClose, onRefresh, onOpenEntry, onRename, onClearTags, onCopyName, onCopyPath, onDissolve, onCollect } = props;
   const menuRef = useRef<HTMLDivElement | null>(null);
   const itemRefs = useRef<(HTMLDivElement | null)[]>([]);
 
@@ -2118,7 +2280,9 @@ function ContextMenu(props: ContextMenuProps) {
       items.push({ key: "copypath", label: "复制路径", danger: false, accel: "Ctrl+Shift+C", action: onCopyPath });
     }
     if (single) items.push({ key: "rename", label: "重命名", danger: false, action: onRename });
-    if (single && single.is_dir) items.push({ key: "dissolve", label: "解散文件夹", danger: false, action: onDissolve });
+    // 解散文件夹：单选文件夹，或多选且全部为文件夹时可用
+    if ((single && single.is_dir) || (paths.length > 1 && allDirs))
+      items.push({ key: "dissolve", label: "解散文件夹", danger: false, action: onDissolve });
     // 收入文件夹：单选或多选都可用，须有至少一项选中
     items.push({ key: "collect", label: "收入到文件夹", danger: false, action: onCollect });
     if (showClearTags)
