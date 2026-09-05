@@ -218,6 +218,8 @@ export default function App() {
   const anchor = useRef(-1);
   // 记录「从哪个父目录进入了哪个子目录」，返回上级时据此恢复光标停留
   const lastEnterRef = useRef<{ parent: string; childPath: string } | null>(null);
+  // 前进重入栈：记录「上退时离开的目录」，使 ← 退到任意上层后 → 仍能跨层重入
+  const fwdRef = useRef<string[]>([]);
   // 待聚焦的子目录项，列表加载到位后将其设为光标与选中（用于返回上级后恢复）
   const [pendingFocus, setPendingFocus] = useState<string | null>(null);
   // 列表滚动容器（用于 PageUp/PageDown 翻页步长）
@@ -421,8 +423,10 @@ export default function App() {
   }, []);
 
   const navigate = useCallback(
-    async (dir: string) => {
+    async (dir: string, opts: { keepForward?: boolean } = {}) => {
       setSearch("");
+      // 前进重入栈只在「上退 / 前进重入」链上保留；分支到别处（面包屑/历史/进入新目录）即清空
+      if (!opts.keepForward) fwdRef.current = [];
       // 先加载，成功后按「实际停留路径」入栈（失效回退时记录父目录，避免历史残留失效路径）
       const result = await loadDir(dir);
       if (!result) return;
@@ -442,6 +446,7 @@ export default function App() {
 
   const goBack = useCallback(async () => {
     if (histIdx <= 0) return;
+    fwdRef.current = []; // 历史后退属分支跳转，前进重入栈作废
     const idx = histIdx - 1;
     setSearch("");
     const result = await loadDir(hist[idx]);
@@ -454,6 +459,7 @@ export default function App() {
 
   const goForward = useCallback(async () => {
     if (histIdx >= hist.length - 1) return;
+    fwdRef.current = []; // 历史前进属分支跳转，前进重入栈作废
     const idx = histIdx + 1;
     setSearch("");
     const result = await loadDir(hist[idx]);
@@ -465,9 +471,19 @@ export default function App() {
   }, [hist, histIdx, loadDir]);
 
   const goUp = useCallback(async () => {
-    const parent = parentOf(path);
-    if (parent && parent !== path) await navigate(parent);
-  }, [path, navigate]);
+  const parent = parentOf(path);
+  if (parent && parent !== path) {
+    // 上退：记录被离开的目录，供跨层 → 重入
+    fwdRef.current.push(path);
+    await navigate(parent, { keepForward: true });
+  }
+}, [path, navigate]);
+
+/** 前进重入：无聚焦行时按上退栈重入最近离开的目录（跨层对称） */
+const stepForward = useCallback(() => {
+  const target = fwdRef.current.pop();
+  if (target) void navigate(target, { keepForward: true });
+}, [navigate]);
 
   /** 地址栏进入编辑态：回填当前路径并聚焦 */
   const beginAddrEdit = useCallback(() => {
@@ -1196,6 +1212,7 @@ export default function App() {
           return;
         }
         setSelected(new Set());
+        anchor.current = -1;
         return;
       }
       if (ev.key === "F2") {
@@ -1263,7 +1280,9 @@ export default function App() {
         void goUp();
       } else if (key === "ArrowRight") {
         ev.preventDefault();
+        // 有聚焦行则进入该项；无聚焦行则按上退栈跨层重入
         if (cursor >= 0) openItem(visibleEntries[cursor]);
+        else stepForward();
       } else {
         return;
       }
@@ -1271,7 +1290,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [goUp, openItem, cursor, visibleEntries]);
+  }, [goUp, openItem, cursor, visibleEntries, stepForward]);
 
   return (
     <div
@@ -1633,9 +1652,10 @@ export default function App() {
               // 点击空白处取消选择（点行内由行处理器接管）
               if ((ev.target as HTMLElement).closest(".row")) return;
               setSelected(new Set());
-              setCursor(-1);
               anchor.current = -1;
-              (ev.currentTarget as HTMLElement).focus();
+              // 焦点交给光标行，保留方向键继续移动；无光标行时落回容器以便重新导航
+              if (cursor >= 0 && cursor < visibleEntries.length) focusRow(cursor);
+              else (ev.currentTarget as HTMLElement).focus();
             }}
             onKeyDown={handleTableKeyDown}
           >
@@ -1690,7 +1710,7 @@ export default function App() {
                     }}
                     tabIndex={idx === cursor ? 0 : -1}
                     aria-selected={selected.has(e.path)}
-                    className={`row ${selected.has(e.path) ? "selected" : ""}`}
+                    className={`row ${idx === cursor ? "focused" : ""} ${selected.has(e.path) ? "selected" : ""}`}
                     onClick={(ev) => {
                       if (ev.shiftKey) {
                         if (anchor.current < 0) anchor.current = cursor >= 0 ? cursor : idx;
@@ -1838,7 +1858,11 @@ export default function App() {
         {selected.size > 0 && <span className="vsep" />}
         <span>{folders} 个文件夹 · {files} 个文件</span>
         <span className="spacer" />
-        <span className="hint">单击选中 · ↑↓/Home/End 移动选中 · Shift 范围多选 · Enter/→ 打开 · Backspace/← 上级 · F2 重命名 · F5 刷新 · 输入字符定位</span>
+        {/* 底部快捷提示：宽窗显示完整键盘捷径；窄窗收敛为高频句，避免被 55% 裁成断句 */}
+        <span className="hint">
+          <span className="hint-long">单击选中 · ↑↓/Home/End 移动 · Shift 范围多选 · Enter/→ 打开 · Backspace/← 上级 · F2 重命名 · F5 刷新 · 输入字符定位</span>
+          <span className="hint-short">↑↓ 移动 · Shift 多选 · Enter 打开 · ← 上级 · F2 重命名</span>
+        </span>
       </footer>
 
       {/* 自定义右键菜单 */}
