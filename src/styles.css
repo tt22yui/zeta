@@ -33,6 +33,8 @@
   --tc-6: #915be0;
 
   --danger: #d9484a;
+  --success: #2fb184;   /* 成功（对齐 --tc-3 色相） */
+  --warning: #e2a13a;   /* 警告（对齐 --tc-4 色相） */
 
   /* 几何 · 圆角 6 档刻度（对齐 MD3 shape scale） */
   --r-xs: 4px;
@@ -88,6 +90,9 @@ html[data-theme="dark"] {
   --tc-4: #e8b04a;
   --tc-5: #ee71ae;
   --tc-6: #ab86f2;
+  --danger: #d9484a;
+  --success: #47c392;
+  --warning: #e8b04a;
   --text-3: #8a8fa3;
   color-scheme: dark;
 }
@@ -561,48 +566,50 @@ input { font: inherit; user-select: text; }
   font-size: 13px;
 }
 
-/* ---------- 错误条 ---------- */
-.errorbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 6px 14px;
-  font-size: 13px;
-  background: var(--danger);
-  color: #fff;
-}
-.errorbar button {
-  padding: 2px 10px;
-  border-radius: var(--r-sm);
-  background: rgba(255, 255, 255, 0.2);
-  color: #fff;
-  transition: background 120ms ease;
-}
-.errorbar button:hover { background: rgba(255, 255, 255, 0.32); }
-
-/* ---------- Toast 轻提示 ---------- */
-.toast {
+/* ---------- 统一轻提示（Toaster） ----------
+   单一位置（底部居中）、分严重级别：成功/信息/警告自动消失，错误常驻需手动关闭。
+   强调方式靠左侧语义色条，主体保持中性，符合「单一强调 + 克制用色」。 */
+.notice {
   position: fixed;
   bottom: 24px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 1000;
-  max-width: min(480px, 80vw);
-  padding: 8px 16px;
-  border-radius: var(--r);
+  max-width: min(520px, 84vw);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  border-radius: var(--r-md);
   background: var(--surface-3);
   border: 1px solid var(--border);
+  border-left: 3px solid var(--notice, var(--accent));
   color: var(--text);
   font-size: 13px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  pointer-events: none;
-  animation: toast-in 160ms ease;
+  animation: notice-in 160ms ease;
 }
-@keyframes toast-in {
+.notice.info    { --notice: var(--accent); }
+.notice.success { --notice: var(--success); }
+.notice.warning { --notice: var(--warning); }
+.notice.error   { --notice: var(--danger); }
+.notice-msg { flex: 1; }
+.notice-close {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--r-xs);
+  color: var(--text-2);
+  transition: background 120ms ease;
+}
+.notice-close:hover { background: var(--state-hover); }
+@keyframes notice-in {
   from { opacity: 0; transform: translate(-50%, 6px); }
   to { opacity: 1; transform: translate(-50%, 0); }
 }
@@ -624,17 +631,6 @@ input { font: inherit; user-select: text; }
 }
 .tagbar-group { display: flex; flex-direction: column; gap: 6px; }
 .tagbar-group + .tagbar-group { border-top: 1px solid var(--border); padding-top: 10px; }
-.side-title {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 4px 6px 4px;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-3);
-}
 .tag-apply {
   width: 100%;
 }
@@ -643,18 +639,17 @@ input { font: inherit; user-select: text; }
   margin: 0;
   padding: 0;
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 .tag-list li { margin: 0; min-width: 0; }
 .tag-row {
-  width: 100%;
-  min-width: 0;
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: var(--r-sm);
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 9px;
+  border-radius: var(--r-full);
   background: var(--surface);
   box-shadow: inset 0 0 0 1px var(--border);
   color: var(--text-2);
@@ -668,7 +663,7 @@ input { font: inherit; user-select: text; }
   border-radius: 50%;
   flex-shrink: 0;
 }
-.tag-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.tag-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .tag-count { font-size: 12px; color: var(--text-3); }
 .empty-hint { padding: 10px; font-size: 12px; line-height: 1.5; color: var(--text-3); }
 
