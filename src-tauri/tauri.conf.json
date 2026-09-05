@@ -19,7 +19,7 @@
         "minWidth": 760,
         "minHeight": 500,
         "decorations": false,
-        "shadow": false,
+        "shadow": true,
         "center": true,
         "visible": false,
         "backgroundColor": "#f6f6f8"

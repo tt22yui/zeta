@@ -123,7 +123,14 @@ input { font: inherit; user-select: text; }
 *::-webkit-scrollbar-track { background: transparent; }
 *::-webkit-scrollbar-corner { background: transparent; }
 
-.app { height: 100%; display: flex; flex-direction: column; }
+.app {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  /* 无边框窗口保留可辨识的边缘：一圈细分描边，便于区分相邻窗口 */
+  border: 1px solid var(--border-strong);
+}
 
 /* ---------- 自定义标题栏（跨平台统一） ---------- */
 .titlebar {
@@ -369,9 +376,8 @@ input { font: inherit; user-select: text; }
   align-items: center;
   height: 100%;
   padding: 0 8px;
-  overflow-x: auto;
+  overflow: hidden;
   white-space: nowrap;
-  scrollbar-width: thin;
   cursor: text;
 }
 .crumb { display: flex; align-items: center; color: var(--text-3); }
@@ -386,6 +392,8 @@ input { font: inherit; user-select: text; }
 .crumb button:hover { background: var(--surface-3); color: var(--text); }
 .crumb button.cur { color: var(--text); font-weight: 600; }
 .crumb-sep { margin: 0 1px; font-size: 12px; }
+.crumb-ellipsis { color: var(--text-3); pointer-events: none; flex-shrink: 0; }
+.crumb-ellipsis-dot { padding: 2px 3px; letter-spacing: 1px; }
 
 /* 地址栏编辑态输入框 */
 .addr-input {
@@ -414,6 +422,7 @@ input { font: inherit; user-select: text; }
 .addr-edit-btn .caret { display: block; }
 .addr-edit-btn:hover { background: var(--surface-3); color: var(--text); }
 .addr-edit-btn.active { background: var(--accent-soft); color: var(--accent-text); }
+.addr-edit-btn:disabled { color: var(--text-3); cursor: default; background: transparent; opacity: 0.6; }
 
 /* 地址栏历史下拉面板 */
 .addr-hist {
@@ -628,13 +637,7 @@ input { font: inherit; user-select: text; }
 }
 .tag-apply {
   width: 100%;
-  /* 弱化：浅底 + 细框，悬停才浮现强调色，降低侧栏视觉重量 */
-  background: var(--surface);
-  box-shadow: inset 0 0 0 1px var(--border);
-  color: var(--accent-text);
 }
-.tag-apply:hover:not(:disabled) { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
-.tag-apply:disabled { opacity: 0.5; }
 .tag-list {
   list-style: none;
   margin: 0;
