@@ -57,6 +57,10 @@ import type { Settings } from "./settings";
 const win = getCurrentWindow();
 const isMac = typeof navigator !== "undefined" && /Mac|Macintosh/i.test(navigator.userAgent);
 
+/** 统一轻提示：severity 决定左侧语义色条与是否自动消失（error 常驻手动关闭） */
+type NoticeSeverity = "info" | "success" | "warning" | "error";
+type Notice = { id: number; severity: NoticeSeverity; msg: string } | null;
+
 /** 标签点颜色：按标签名哈希稳定取色 */
 const TAG_COLORS = [
   "var(--tc-1)",
@@ -161,21 +165,25 @@ export default function App() {
   const [driveOpen, setDriveOpen] = useState(false);
   const driveWrapRef = useRef<HTMLDivElement | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  // Toast：短暂自动消失的轻提示（如路径失效回退）
-  const [toast, setToast] = useState<{ id: number; msg: string } | null>(null);
-  const toastTimer = useRef<number>();
-  const toastIdRef = useRef(0);
-  const toastRef = useRef<(msg: string) => void>(() => {});
-  const showToast = useCallback((msg: string) => {
-    const id = ++toastIdRef.current;
-    setToast({ id, msg });
-    window.clearTimeout(toastTimer.current);
-    toastTimer.current = window.setTimeout(() => {
-      setToast((cur) => (cur && cur.id === id ? null : cur));
-    }, 3000);
+  // 统一轻提示：单一底部 Toaster（info/success/warning 自动消失，error 常驻可手动关闭）
+  const [notice, setNotice] = useState<Notice>(null);
+  const noticeTimer = useRef<number>();
+  const noticeIdRef = useRef(0);
+  const clearNotice = useCallback(() => {
+    window.clearTimeout(noticeTimer.current);
+    setNotice(null);
   }, []);
-  toastRef.current = showToast;
+  const showNotice = useCallback((severity: NoticeSeverity, msg: string) => {
+    const id = ++noticeIdRef.current;
+    setNotice({ id, severity, msg });
+    window.clearTimeout(noticeTimer.current);
+    if (severity !== "error") {
+      const dur = severity === "warning" ? 3500 : 2000;
+      noticeTimer.current = window.setTimeout(() => {
+        setNotice((cur) => (cur && cur.id === id ? null : cur));
+      }, dur);
+    }
+  }, []);
   // 集中式弹窗编排：null=不弹；kind="confirm" 确认框 / "prompt" 输入框（替代原生 confirm/prompt）
   const [dialog, setDialog] = useState<
     | { kind: "confirm"; title: string; message: string; danger?: boolean; confirmLabel?: string; action: () => void }
@@ -291,7 +299,7 @@ export default function App() {
     ): Promise<{ path: string; list: FileEntry[] } | null> => {
       const { silent = false, noErrorUi = false } = opts;
       if (!silent) setLoading(true);
-      if (!noErrorUi) setError("");
+      if (!noErrorUi) clearNotice();
       try {
         const list = await listDir(dir);
         setEntries(list);
@@ -306,13 +314,13 @@ export default function App() {
         }
         return { path: dir, list };
       } catch (e) {
-        if (!noErrorUi) setError(String(e));
+        if (!noErrorUi) showNotice("error", String(e));
         // 路径失效回退：父目录可用则进入父目录，否则退回默认目录
         const parent = parentOf(dir);
         if (parent && parent !== dir) {
           const r = await loadDir(parent, { silent: true, noErrorUi });
           if (r) {
-            toastRef.current(`路径不存在，已回退到 ${parent}`);
+            showNotice("warning", `路径不存在，已回退到 ${parent}`);
             return r;
           }
         }
@@ -321,7 +329,7 @@ export default function App() {
           if (def && def !== dir) {
             const r = await loadDir(def, { silent: true, noErrorUi });
             if (r) {
-              toastRef.current("路径不存在，已回退到默认目录");
+              showNotice("warning", "路径不存在，已回退到默认目录");
               return r;
             }
           }
@@ -790,13 +798,13 @@ export default function App() {
           inFlight = false;
           if (r === TIMEOUT) {
             timeouts++;
-            if (timeouts === 3) setError(`网络路径响应超时：${path}`);
+            if (timeouts === 3) showNotice("error", `网络路径响应超时：${path}`);
             return;
           }
           const stuck = timeouts >= 3;
           timeouts = 0;
-          if (r === null) setError(`无法访问网络路径：${path}`);
-          else if (stuck) setError(""); // 超时恢复后清除提示
+          if (r === null) showNotice("error", `无法访问网络路径：${path}`);
+          else if (stuck) clearNotice(); // 超时恢复后清除提示
         });
       }, 3000);
       return () => window.clearInterval(timer);
@@ -821,13 +829,13 @@ export default function App() {
         if (!alive) fn();
         else unlisten = fn;
       })
-      .catch((e) => setError(`自动刷新监听失败：${e}`)); // 便于排查授权/路径问题
+      .catch((e) => showNotice("error", `自动刷新监听失败：${e}`)); // 便于排查授权/路径问题
     return () => {
       alive = false;
       window.clearTimeout(timer);
       unlisten?.();
     };
-  }, [path, reload, setError]);
+  }, [path, reload, showNotice, clearNotice]);
 
   // 地址栏进入编辑态时聚焦并全选
   useEffect(() => {
@@ -875,10 +883,10 @@ export default function App() {
     selfOpAt.current = Date.now();
     const tag = tagInput.trim();
     if (!tag || selected.size === 0) {
-      setError(selected.size === 0 ? "请先在列表中选择文件" : "标签不能为空");
+      showNotice("error", selected.size === 0 ? "请先在列表中选择文件" : "标签不能为空");
       return;
     }
-    setError("");
+    clearNotice();
     try {
       // addTag 返回改名后的新路径，收集用于重载后恢复选中
       const newPaths: string[] = [];
@@ -886,16 +894,16 @@ export default function App() {
       await reload();
       if (newPaths.length) setSelected(new Set(newPaths));
     } catch (e) {
-      setError(String(e));
+      showNotice("error", String(e));
     }
-  }, [tagInput, selected, reload]);
+  }, [tagInput, selected, reload, showNotice, clearNotice]);
 
   /** 侧栏标签点击：给所有选中项打该标签，已含该标签的项自动忽略 */
   const applyTagFromSidebar = useCallback(
     async (tag: string) => {
       if (selected.size === 0) return;
       selfOpAt.current = Date.now();
-      setError("");
+      clearNotice();
       const byPath = new Map<string, string[]>();
       for (const e of entries) byPath.set(e.path, e.tags);
       const targets = [...selected].filter((p) => !(byPath.get(p) ?? []).includes(tag));
@@ -908,10 +916,10 @@ export default function App() {
         // 重载会清空选中，用改名后的新路径恢复选中
         setSelected(new Set(newPaths));
       } catch (e) {
-        setError(String(e));
+        showNotice("error", String(e));
       }
     },
-    [selected, entries, reload]
+    [selected, entries, reload, showNotice, clearNotice]
   );
 
   const removeTagFrom = useCallback(
@@ -921,10 +929,10 @@ export default function App() {
         await removeTag(entry.path, tag);
         await reload();
       } catch (e) {
-        setError(String(e));
+        showNotice("error", String(e));
       }
     },
-    [reload]
+    [reload, showNotice]
   );
 
   const closeCtxMenu = useCallback(() => setCtxMenu(null), []);
@@ -957,10 +965,10 @@ export default function App() {
         }
         await reload();
       } catch (err) {
-        setError(String(err));
+        showNotice("error", String(err));
       }
     },
-    [entries, reload]
+    [entries, reload, showNotice]
   );
 
   const toggleSelect = useCallback((entry: FileEntry, additive: boolean) => {
@@ -983,9 +991,9 @@ export default function App() {
       if (entry.is_dir) {
         lastEnterRef.current = { parent: path, childPath: entry.path };
         navigate(entry.path);
-      } else openInDefault(entry.path).catch((e) => setError(String(e)));
+      } else openInDefault(entry.path).catch((e) => showNotice("error", String(e)));
     },
-    [navigate, path]
+    [navigate, path, showNotice]
   );
 
   // visibleEntries 变化时钳制光标落在有效范围内
@@ -1066,9 +1074,9 @@ export default function App() {
       await renameFile(entry.path, newPath);
       await reload();
     } catch (e) {
-      setError(String(e));
+      showNotice("error", String(e));
     }
-  }, [renamingIdx, renameVal, visibleEntries, reload]);
+  }, [renamingIdx, renameVal, visibleEntries, reload, showNotice]);
 
   // 开始对光标行重命名（F2）
   const startRename = useCallback(() => {
@@ -1449,8 +1457,8 @@ export default function App() {
                 onClick={(ev) => {
                   ev.stopPropagation();
                   void copyText(path).then(
-                    () => showToast("已复制地址"),
-                    () => showToast("复制失败")
+                    () => showNotice("success", "已复制地址"),
+                    () => showNotice("error", "复制失败")
                   );
                 }}
                 title="复制地址"
@@ -1463,7 +1471,7 @@ export default function App() {
                 disabled={!path}
                 onClick={(ev) => {
                   ev.stopPropagation();
-                  void openInDefault(path).catch(() => showToast("打开失败"));
+                  void openInDefault(path).catch(() => showNotice("error", "打开失败"));
                 }}
                 title="用系统资源管理器打开"
                 aria-label="用系统资源管理器打开"
@@ -1598,16 +1606,14 @@ export default function App() {
         </button>
       </header>
 
-      {error && (
-        <div className="errorbar">
-          <span>{error}</span>
-          <button onClick={() => setError("")}>关闭</button>
-        </div>
-      )}
-
-      {toast && (
-        <div key={toast.id} className="toast" role="status">
-          {toast.msg}
+      {notice && (
+        <div key={notice.id} className={`notice ${notice.severity}`} role={notice.severity === "error" ? "alert" : "status"}>
+          <span className="notice-msg">{notice.msg}</span>
+          {notice.severity === "error" && (
+            <button className="notice-close" onClick={clearNotice} aria-label="关闭" title="关闭">
+              <IconClose size={14} />
+            </button>
+          )}
         </div>
       )}
 
@@ -1769,9 +1775,6 @@ export default function App() {
         {/* 右侧：打标签工具 + 标签展示 */}
         <aside className="tagbar">
           <div className="tagbar-group">
-            <div className="side-title">
-              <span>打标签</span>
-            </div>
             <div className="tag-input-wrap">
               <IconTag size={15} />
               <input
@@ -1807,9 +1810,6 @@ export default function App() {
           </div>
 
           <div className="tagbar-group">
-            <div className="side-title">
-              <span>标签</span>
-            </div>
             <ul className="tag-list">
               {tagCounts.map(([tag, count]) => (
                 <li key={tag}>
@@ -1888,7 +1888,7 @@ export default function App() {
                     await dissolveFolder(s.path);
                     await reload();
                   } catch (e) {
-                    setError(String(e));
+                    showNotice("error", String(e));
                   }
                 })();
               },
@@ -1918,7 +1918,7 @@ export default function App() {
                       selectOnly(i);
                     }
                   } catch (e) {
-                    setError(String(e));
+                    showNotice("error", String(e));
                   }
                 })();
               },
