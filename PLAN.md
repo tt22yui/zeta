@@ -115,6 +115,23 @@
 
    - 本轮明确不做：预览行为开关、插件实际启停、迁移既有 `#` 标签文件（改分隔符后旧 `#` 标签不再被解析，属配置变更固有代价）。
 
+## 新增计划（待做）
+
+1. **解散文件夹动画**
+   - 解散前给目标文件夹行加约 160ms 收缩+淡出过渡，结束后再上移 + reload；`prefers-reduced-motion` 下不等待、直接执行。
+   - 位置：`src/App.tsx` onDissolve 与行渲染；`styles.css` 新增 `.row-dissolving` 动画与 reduced-motion 兜底。
+
+2. **地址栏自适应省略修复**
+   - 根段（盘符 / macOS 根 `/`）始终保留，只裁中间祖先；省略号 `…` 改为可点，弹出菜单跳到被隐藏的中间目录（复用 `openCrumbMenu` / 驱动器菜单样式、`navigate`）。
+   - 位置：`src/App.tsx` breadcrumbs 生成与渲染；`styles.css`。
+
+3. **驱动器选择按钮增加 macOS 支持**
+   - 后端 `get_drives` 平台分支：macOS/Linux 枚举 `/Volumes/*` + 根 `/`（抽 `collect_mount_points()` 纯函数），保留 Windows 盘符枚举。
+   - 前端 `currentDrive` 改为「最长前缀」匹配（避免根 `/` 全命中）；驱动器按钮的卷名/label 平台化展示。
+   - 位置：`src-tauri/src/lib.rs` `get_drives`；`src/App.tsx` 驱动器按钮与 `currentDrive`。
+
+验证：`cargo check` / `cargo test`、`npx tsc --noEmit`、`npm run tauri dev` 手测（解散动画、长路径省略可回隐藏目录、macOS 驱动器列 `/Volumes` 卷）。
+
 ## 验证状态
 
 - `npx tsc --noEmit`：通过
