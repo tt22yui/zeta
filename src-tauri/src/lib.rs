@@ -180,9 +180,13 @@ fn is_system_file(meta: &fs::Metadata, name: &str) -> bool {
     #[cfg(not(windows))]
     {
         let _ = meta;
+        // 以点开头的隐藏文件在 macOS/Linux 上默认折叠（回归：隐藏目录如 .git）。
+        // Windows 上点文件不算隐藏，隐藏与否由 is_hidden 依据属性位判定。
+        if name.starts_with('.') {
+            return true;
+        }
     }
-    // 以点开头的隐藏文件在 macOS/Linux 上默认折叠（回归：隐藏目录如 .git）
-    name.starts_with('.')
+    false
 }
 
 /// 列出某个目录下的文件与文件夹。
