@@ -1406,7 +1406,7 @@ const stepForward = useCallback(() => {
         <div className="titlebar-id" data-tauri-drag-region>
           <span className="titlebar-mark" aria-hidden="true">#</span>
           <span className="titlebar-name" data-tauri-drag-region>
-            Zeta
+            标签匣
             {appVersion ? (
               <span className="titlebar-ver" data-tauri-drag-region>v{appVersion}</span>
             ) : null}
