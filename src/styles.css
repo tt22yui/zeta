@@ -332,7 +332,8 @@ input { font: inherit; user-select: text; }
   top: calc(100% + 4px);
   left: 0;
   z-index: 120;
-  min-width: 200px;
+  width: max-content;
+  min-width: 90px;
   max-height: 300px;
   overflow-y: auto;
   padding: 6px;
@@ -358,7 +359,7 @@ input { font: inherit; user-select: text; }
 .drive-item:hover { background: var(--surface-3); color: var(--text); }
 .drive-item.active { color: var(--accent-text); font-weight: 600; }
 .drive-item-label { flex-shrink: 0; }
-.drive-item-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); }
+.drive-item-path { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); }
 
 /* 收藏路径：工具栏下拉（盘符左侧按钮） */
 .fav-select { position: relative; flex-shrink: 0; }
@@ -621,7 +622,8 @@ input { font: inherit; user-select: text; }
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 .tag-input {
-  width: 150px;
+  flex: 1;
+  min-width: 0;
   border: none;
   outline: none;
   background: transparent;
@@ -695,8 +697,21 @@ input { font: inherit; user-select: text; }
 .tagbar-group { display: flex; flex-direction: column; gap: 6px; }
 .tagbar-group + .tagbar-group { border-top: 1px solid var(--border); padding-top: 10px; }
 .tag-apply {
-  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(var(--ctl) - 6px);
+  height: calc(var(--ctl) - 6px);
+  margin: 3px;
+  color: var(--text-2);
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease;
 }
+.tag-apply:hover:not(:disabled) { color: var(--accent); background: var(--accent-soft); }
+.tag-apply:disabled { opacity: 0.4; cursor: default; }
 .tag-list {
   list-style: none;
   margin: 0;
@@ -798,6 +813,16 @@ input { font: inherit; user-select: text; }
 @keyframes dir-in {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
+}
+/* 解散文件夹：行收缩+淡出，结束后由前端执行真正的解散与 reload。
+   用 opacity+scaleY 视觉收缩，避免逐行重排造成闪烁。 */
+.row-dissolving {
+  animation: row-dissolve 160ms ease-in forwards;
+  pointer-events: none;
+}
+@keyframes row-dissolve {
+  from { opacity: 1; transform: scaleY(1); }
+  to { opacity: 0; transform: scaleY(0.4); }
 }
 .row {
   min-height: 40px;
@@ -945,6 +970,7 @@ button.col.sorted { color: var(--accent-text); }
 @media (prefers-reduced-motion: reduce) {
   .context-menu { animation: none; }
   .dir-enter { animation: none; }
+  .row-dissolving { animation: none; }
 }
 .ctx-item {
   display: flex;

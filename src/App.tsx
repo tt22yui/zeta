@@ -260,8 +260,10 @@ export default function App() {
   const lastPathRef = useRef<string>("");
   const renameCommitted = useRef(false);
   // 记录本应用发起的文件操作时间点：随后较短窗口内的 watch 自动刷新会被跳过，
-  // 避免“操作后显式 reload + watch 防抖 reload”造成的重复加载闪烁。
+  // 避免"操作后显式 reload + watch 防抖 reload"造成的重复加载闪烁。
   const selfOpAt = useRef(0);
+  // 解散文件夹动画：正在收缩淡出的行路径集合（动画结束才真正执行解散）
+  const [dissolving, setDissolving] = useState<Set<string>>(new Set());
 
   useEffect(() => () => window.clearTimeout(typeTimer.current), []);
 
@@ -545,6 +547,9 @@ const stepForward = useCallback(() => {
       } catch {
         items = [];
       }
+      setHistOpen(false);
+      setDriveOpen(false);
+      setFavOpen(false);
       setCrumbMenu({ path: dir, left, top: r.bottom + 4, items });
     },
     []
@@ -638,10 +643,10 @@ const stepForward = useCallback(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setCrumbMenu(null);
     };
-    window.setTimeout(() => window.addEventListener("click", onDoc), 0);
+    window.setTimeout(() => window.addEventListener("mousedown", onDoc, true), 0);
     window.addEventListener("keydown", onKey);
     return () => {
-      window.removeEventListener("click", onDoc);
+      window.removeEventListener("mousedown", onDoc, true);
       window.removeEventListener("keydown", onKey);
     };
   }, [crumbMenu]);
@@ -655,10 +660,10 @@ const stepForward = useCallback(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setDriveOpen(false);
     };
-    window.setTimeout(() => window.addEventListener("click", onDoc), 0);
+    window.setTimeout(() => window.addEventListener("mousedown", onDoc, true), 0);
     window.addEventListener("keydown", onKey);
     return () => {
-      window.removeEventListener("click", onDoc);
+      window.removeEventListener("mousedown", onDoc, true);
       window.removeEventListener("keydown", onKey);
     };
   }, [driveOpen]);
@@ -672,10 +677,10 @@ const stepForward = useCallback(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setFavOpen(false);
     };
-    window.setTimeout(() => window.addEventListener("click", onDoc), 0);
+    window.setTimeout(() => window.addEventListener("mousedown", onDoc, true), 0);
     window.addEventListener("keydown", onKey);
     return () => {
-      window.removeEventListener("click", onDoc);
+      window.removeEventListener("mousedown", onDoc, true);
       window.removeEventListener("keydown", onKey);
     };
   }, [favOpen]);
@@ -918,10 +923,10 @@ const stepForward = useCallback(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setHistOpen(false);
     };
-    window.setTimeout(() => window.addEventListener("click", onDoc), 0); // 延迟避免按钮同次点击立即关闭
+    window.setTimeout(() => window.addEventListener("mousedown", onDoc, true), 0); // 延迟到本次按钮事件之后，避免打开即关闭
     window.addEventListener("keydown", onKey);
     return () => {
-      window.removeEventListener("click", onDoc);
+      window.removeEventListener("mousedown", onDoc, true);
       window.removeEventListener("keydown", onKey);
     };
   }, [histOpen]);
@@ -1462,7 +1467,9 @@ const stepForward = useCallback(() => {
               className={`icon-btn fav-trigger ${favOpen ? "active" : ""}`}
               onClick={(ev) => {
                 ev.stopPropagation();
-                setFavOpen((v) => !v);
+                const will = !favOpen;
+                closeAllPopups();
+                if (will) setFavOpen(true);
               }}
               title="收藏路径"
               aria-label="收藏路径"
@@ -1515,7 +1522,9 @@ const stepForward = useCallback(() => {
               className="drive-trigger"
               onClick={(ev) => {
                 ev.stopPropagation();
-                setDriveOpen((v) => !v);
+                const will = !driveOpen;
+                closeAllPopups();
+                if (will) setDriveOpen(true);
               }}
               title={currentDrive ?? "网络位置（无盘符）"}
               aria-haspopup="menu"
@@ -1555,6 +1564,7 @@ const stepForward = useCallback(() => {
             <input
               ref={addrRef}
               className="addr-input"
+              autoComplete="off"
               value={addrValue}
               onChange={(e) => setAddrValue(e.target.value)}
               onKeyDown={(e) => {
@@ -1652,7 +1662,9 @@ const stepForward = useCallback(() => {
                 className={`addr-edit-btn ${histOpen ? "active" : ""}`}
                 onClick={(ev) => {
                   ev.stopPropagation();
-                  setHistOpen((v) => !v);
+                  const will = !histOpen;
+                  closeAllPopups();
+                  if (will) setHistOpen(true);
                 }}
                 title="浏览访问历史"
                 aria-label="浏览访问历史"
@@ -1761,6 +1773,7 @@ const stepForward = useCallback(() => {
           <IconSearch size={15} />
           <input
             className="search-input"
+            autoComplete="off"
             placeholder="筛选当前目录…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -1863,7 +1876,7 @@ const stepForward = useCallback(() => {
                     }}
                     tabIndex={idx === cursor ? 0 : -1}
                     aria-selected={selected.has(e.path)}
-                    className={`row ${idx === cursor ? "focused" : ""} ${selected.has(e.path) ? "selected" : ""}`}
+                    className={`row ${idx === cursor ? "focused" : ""} ${selected.has(e.path) ? "selected" : ""} ${dissolving.has(e.path) ? "row-dissolving" : ""}`}
                     onClick={(ev) => {
                       if (ev.shiftKey) {
                         if (anchor.current < 0) anchor.current = cursor >= 0 ? cursor : idx;
@@ -1893,6 +1906,7 @@ const stepForward = useCallback(() => {
                         <input
                           ref={renameRef}
                           className="rename-input"
+                          autoComplete="off"
                           value={renameVal}
                           onChange={(ev2) => setRenameVal(ev2.target.value)}
                           onMouseDown={(ev2) => ev2.stopPropagation()}
@@ -1949,11 +1963,11 @@ const stepForward = useCallback(() => {
         <aside className="tagbar">
           <div className="tagbar-group">
             <div className="tag-input-wrap">
-              <IconTag size={15} />
               <input
                 ref={tagInputRef}
                 className="tag-input"
-                placeholder={selected.size > 0 ? "给选中项打标签" : "先选中文件"}
+                autoComplete="off"
+                placeholder="输入标签"
                 value={tagInput}
                 onChange={(e) => setTagInput(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && applyTagToSelection()}
@@ -1972,14 +1986,16 @@ const stepForward = useCallback(() => {
                   <IconClose size={13} />
                 </button>
               )}
+              <button
+                className="tag-apply"
+                onClick={applyTagToSelection}
+                disabled={selected.size === 0}
+                title={selected.size > 0 ? `给 ${selected.size} 个选中项打标签` : "先选中文件"}
+                aria-label="打标签"
+              >
+                <IconTag size={16} />
+              </button>
             </div>
-            <button
-              className="btn primary tag-apply"
-              onClick={applyTagToSelection}
-              disabled={selected.size === 0}
-            >
-              打标签{selected.size > 0 ? ` (${selected.size})` : ""}
-            </button>
           </div>
 
           <div className="tagbar-group">
@@ -2068,11 +2084,18 @@ const stepForward = useCallback(() => {
               confirmLabel: "解散",
               action: () => {
                 void (async () => {
+                  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+                  if (!reduce) {
+                    setDissolving(new Set(dirs));
+                    await new Promise((r) => setTimeout(r, 160));
+                  }
                   selfOpAt.current = Date.now();
                   try {
                     for (const p of dirs) await dissolveFolder(p);
+                    setDissolving(new Set());
                     await reload();
                   } catch (e) {
+                    setDissolving(new Set());
                     showNotice("error", String(e));
                   }
                 })();

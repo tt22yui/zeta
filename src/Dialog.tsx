@@ -87,6 +87,7 @@ export function PromptDialog(props: PromptDialogProps) {
               id="zeta-prompt-input"
               ref={inputRef}
               className="zeta-dialog-input"
+              autoComplete="off"
               value={value}
               onChange={(e) => setValue(e.target.value)}
               onKeyDown={(e) => {
