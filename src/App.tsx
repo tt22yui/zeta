@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
+import { flushSync } from "react-dom";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
 import { watchImmediate } from "@tauri-apps/plugin-fs";
@@ -1266,7 +1267,8 @@ const stepForward = useCallback(() => {
           setPreviewPath(null);
         } else {
           const target = visibleEntries.find((e) => selected.has(e.path));
-          if (target && !target.is_dir) setPreviewPath(target.path);
+          // flushSync：让预览媒体在本次键盘手势内同步挂载，带声自动播放才被浏览器放行
+          if (target && !target.is_dir) flushSync(() => setPreviewPath(target.path));
         }
         return;
       }
@@ -1889,6 +1891,9 @@ const stepForward = useCallback(() => {
                         focusRow(idx);
                       } else {
                         selectOnly(idx);
+                        // 预览已打开时跟随选中：点到文件切换预览、点到目录关闭预览。
+                        // flushSync 在手势内同步挂载新媒体，保证带声自动播放
+                        if (previewPath) flushSync(() => setPreviewPath(e.is_dir ? null : e.path));
                       }
                     }}
                     onDoubleClick={() => openItem(e)}

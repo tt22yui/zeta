@@ -246,3 +246,47 @@ export function IconFolder({ size = 18, className }: IconProps) {
     </svg>
   );
 }
+
+/** 音乐（音频预览·未播放占位） */
+export function IconMusic({ size = 64, className }: IconProps) {
+  return (
+    <Svg size={size} className={className}>
+      <path d="M9 18V5l12-2v13" />
+      <circle cx="6" cy="18" r="3" />
+      <circle cx="18" cy="16" r="3" />
+    </Svg>
+  );
+}
+
+/** 播放（实心三角，圆形播放按钮用） */
+export function IconPlay({ size = 16, className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={size}
+      height={size}
+      fill="currentColor"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d="M8 5.14v13.72c0 .8.87 1.3 1.56.9l10.9-6.86a1.05 1.05 0 0 0 0-1.8L9.56 4.24A1.04 1.04 0 0 0 8 5.14z" />
+    </svg>
+  );
+}
+
+/** 暂停（实心双竖条，圆形暂停按钮用） */
+export function IconPause({ size = 16, className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={size}
+      height={size}
+      fill="currentColor"
+      className={className}
+      aria-hidden="true"
+    >
+      <rect x="6" y="4" width="4" height="16" rx="1.2" />
+      <rect x="14" y="4" width="4" height="16" rx="1.2" />
+    </svg>
+  );
+}

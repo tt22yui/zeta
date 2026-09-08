@@ -56,6 +56,12 @@
     -apple-system, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, monospace;
 
+  /* 空格预览·媒体舞台：固定深色沉浸底（主题无关，类比 QuickLook），文案用其上亮色 */
+  --preview-stage-bg: #16161a;
+  --preview-stage-text: #e6e7ee;
+  --preview-stage-text-2: #a2a4b0;
+  --preview-stage-spin: rgba(255, 255, 255, 0.35);
+
   color: var(--text);
   font-family: var(--font);
 }
@@ -1004,7 +1010,8 @@ button.col.sorted { color: var(--accent-text); }
 /* ---------- 空格预览面板（右侧抽屉，headlessui Transition 驱动动画） ---------- */
 .preview-pane {
   position: fixed;
-  top: 0;
+  /* 从 36px 自绘标题栏下方开始，避免预览关闭按钮与主窗口右上角控制按钮重叠 */
+  top: 36px;
   right: 0;
   bottom: 0;
   width: clamp(360px, 38vw, 560px);
@@ -1074,16 +1081,230 @@ button.col.sorted { color: var(--accent-text); }
   display: block;
   max-width: 100%;
 }
-.preview-img {
-  margin: 12px auto;
-  object-fit: contain;
-  max-height: calc(100vh - 80px);
-}
 .preview-pdf {
   width: 100%;
   height: calc(100vh - 48px);
   border: none;
 }
+/* 媒体预览舞台：固定深色沉浸底 + 双轴居中（深浅色主题保持一致观感，类似 QuickLook）。
+   仅用于图片/视频/音频；文本与兜底仍用面板浅色底。 */
+.preview-stage {
+  position: relative;
+  flex: 1;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: var(--preview-stage-bg);
+  overflow: hidden;
+}
+.preview-stage-placeholder {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+.preview-stage-spinner {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--preview-stage-spin);
+  border-top-color: transparent;
+  animation: zeta-spin 0.7s linear infinite;
+}
+@keyframes zeta-spin { to { transform: rotate(360deg); } }
+.preview-stage-media {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--r-md);
+  box-shadow: 0 6px 28px rgba(0, 0, 0, 0.4);
+  transition: opacity 160ms ease;
+}
+/* 音频播放区：纵向居中，附带文件名与大小元信息 */
+.preview-stage-audio {
+  padding: 24px;
+}
+.preview-audio {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  max-width: 100%;
+  width: 100%;
+}
+.preview-audio-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--preview-stage-text);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.preview-audio-meta {
+  font-size: 12px;
+  color: var(--preview-stage-text-2);
+}
+/* 可视化区：canvas 频谱 + 未播放时的音乐图标占位（相互淡切） */
+.preview-visual {
+  position: relative;
+  width: 100%;
+  height: 130px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+.preview-visual-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.preview-audio-art {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--preview-stage-text-2);
+  opacity: 1;
+  transition: opacity 160ms ease;
+  pointer-events: none;
+}
+.preview-audio-art.hidden { opacity: 0; }
+/* 音频无法解码/格式不受支持时的居中提示 */
+.preview-audio-error {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 0 24px;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--preview-stage-text-2);
+  user-select: none;
+}
+/* 进度条：轨道为半透明浅条，已播放段用强调色 */
+.preview-progress {
+  position: relative;
+  width: 100%;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+.preview-progress::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+}
+.preview-progress-fill {
+  position: relative;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+.preview-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+.preview-playbtn {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: none;
+  background: var(--accent);
+  color: var(--on-accent);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background 90ms ease;
+}
+.preview-playbtn:hover {
+  background: var(--accent-hover);
+}
+.preview-audio-time {
+  font-size: 12px;
+  color: var(--preview-stage-text-2);
+  font-variant-numeric: tabular-nums;
+}
+.preview-audio-time-total {
+  margin-left: auto;
+}
+@media (prefers-reduced-motion: reduce) {
+  .preview-stage-media { transition: none; }
+  .preview-stage-spinner { animation: none; }
+  .preview-audio-art { transition: none; }
+}
+/* Markdown 预览（富文本渲染，非源文件）：正文排版 + 代码/引用/表格/图片 */
+.preview-markdown {
+  padding: 14px 18px;
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: var(--text);
+  overflow-wrap: break-word;
+}
+.preview-markdown > :first-child { margin-top: 0; }
+.preview-markdown > :last-child { margin-bottom: 0; }
+.preview-markdown h1,
+.preview-markdown h2,
+.preview-markdown h3,
+.preview-markdown h4,
+.preview-markdown h5,
+.preview-markdown h6 {
+  margin: 1.1em 0 0.5em;
+  line-height: 1.35;
+  font-weight: 600;
+}
+.preview-markdown h1 { font-size: 1.5em; border-bottom: 1px solid var(--border); padding-bottom: 0.3em; }
+.preview-markdown h2 { font-size: 1.3em; border-bottom: 1px solid var(--border); padding-bottom: 0.25em; }
+.preview-markdown h3 { font-size: 1.15em; }
+.preview-markdown p { margin: 0.5em 0; }
+.preview-markdown ul,
+.preview-markdown ol { margin: 0.5em 0; padding-left: 1.6em; }
+.preview-markdown li { margin: 0.25em 0; }
+.preview-markdown a { color: var(--accent); text-decoration: none; }
+.preview-markdown a:hover { text-decoration: underline; }
+.preview-markdown code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  background: var(--surface-3);
+  padding: 0.15em 0.4em;
+  border-radius: var(--r-xs);
+}
+.preview-markdown pre {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 12px 14px;
+  overflow: auto;
+  margin: 0.6em 0;
+}
+.preview-markdown pre code { background: none; padding: 0; font-size: 12.5px; line-height: 1.6; }
+.preview-markdown blockquote {
+  margin: 0.6em 0;
+  padding: 0.2em 1em;
+  border-left: 3px solid var(--accent);
+  color: var(--text-2);
+  background: var(--surface-2);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+}
+.preview-markdown table { border-collapse: collapse; margin: 0.6em 0; width: 100%; }
+.preview-markdown th,
+.preview-markdown td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+.preview-markdown th { background: var(--surface-2); font-weight: 600; }
+.preview-markdown img { max-width: 100%; height: auto; border-radius: var(--r-sm); margin: 0.4em 0; }
+.preview-markdown hr { border: none; border-top: 1px solid var(--border); margin: 1.2em 0; }
+.preview-markdown-note { padding: 0 18px 12px; font-size: 12px; color: var(--text-3); }
+
 .preview-text {
   margin: 0;
   padding: 12px 14px;
