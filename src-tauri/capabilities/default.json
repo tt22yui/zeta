@@ -20,6 +20,7 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-unmaximize",
     "core:window:allow-close",
-    "clipboard-manager:allow-write-text"
+    "clipboard-manager:allow-write-text",
+    "drag:default"
   ]
 }

@@ -11,6 +11,7 @@ import { flushSync } from "react-dom";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
 import { watchImmediate } from "@tauri-apps/plugin-fs";
+import { startDrag } from "@crabnebula/tauri-plugin-drag";
 import {
   addTag,
   collectIntoFolder,
@@ -81,6 +82,51 @@ function hashStr(s: string): number {
 }
 export function tagColor(tag: string): string {
   return TAG_COLORS[hashStr(tag) % TAG_COLORS.length];
+}
+
+/**
+ * 生成原生拖拽的预览图标（透明 PNG data URI）。原生拖拽必须携带一张图片，
+ * 这里用 canvas 画一个「文件堆叠」图形，避免依赖磁盘上的额外资源，任意文件类型通用。
+ */
+function makeDragIcon(): string {
+  const c = document.createElement("canvas");
+  c.width = 64;
+  c.height = 64;
+  const ctx = c.getContext("2d");
+  if (ctx) {
+    ctx.clearRect(0, 0, 64, 64);
+    // 底层两页淡色，示意多文件
+    ctx.fillStyle = "rgba(120,124,150,0.5)";
+    ctx.beginPath();
+    ctx.roundRect(13, 24, 40, 38, 6);
+    ctx.fill();
+    ctx.fillStyle = "rgba(168,172,196,0.75)";
+    ctx.beginPath();
+    ctx.roundRect(11, 13, 40, 38, 6);
+    ctx.fill();
+    // 首页白底
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.roundRect(9, 2, 40, 38, 6);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(96,100,128,0.85)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(9, 2, 40, 38, 6);
+    ctx.stroke();
+    // 内容示意线
+    ctx.strokeStyle = "rgba(150,154,180,0.9)";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(17, 14);
+    ctx.lineTo(41, 14);
+    ctx.moveTo(17, 24);
+    ctx.lineTo(37, 24);
+    ctx.moveTo(17, 32);
+    ctx.lineTo(37, 32);
+    ctx.stroke();
+  }
+  return c.toDataURL("image/png");
 }
 
 /** 常见扩展名 -> 类型名 + 主题色，用于统一的文件类型图标 */
@@ -1879,6 +1925,19 @@ const stepForward = useCallback(() => {
                     tabIndex={idx === cursor ? 0 : -1}
                     aria-selected={selected.has(e.path)}
                     className={`row ${idx === cursor ? "focused" : ""} ${selected.has(e.path) ? "selected" : ""} ${dissolving.has(e.path) ? "row-dissolving" : ""}`}
+                    draggable={renamingIdx !== idx}
+                    onDragStart={(ev) => {
+                      // 取消 HTML5 拖拽，改用原生 OLE/NSDraggingSession 拖真实文件，
+                      // 这样飞书/企微等要求真实文件句柄的外部应用才能接收。
+                      ev.preventDefault();
+                      const paths =
+                        selected.has(e.path) && selected.size > 1
+                          ? [...selected]
+                          : [e.path];
+                      startDrag({ item: paths, icon: makeDragIcon(), mode: "copy" }).catch(
+                        (err) => console.error("原生拖拽失败:", err)
+                      );
+                    }}
                     onClick={(ev) => {
                       if (ev.shiftKey) {
                         if (anchor.current < 0) anchor.current = cursor >= 0 ? cursor : idx;
