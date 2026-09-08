@@ -1214,6 +1214,19 @@ const stepForward = useCallback(() => {
     setRenamingIdx(cursor);
   }, [cursor, visibleEntries]);
 
+  // 键盘把选中光标移到第 n 行时，若预览已打开则跟随光标：
+  // 文件切换预览（手势内同步挂载保证带声自动播放）、目录关闭预览。
+  const syncPreview = useCallback(
+    (n: number) => {
+      if (!previewPath) return;
+      const target = visibleEntries[n];
+      if (!target) return;
+      if (target.is_dir) setPreviewPath(null);
+      else flushSync(() => setPreviewPath(target.path));
+    },
+    [previewPath, visibleEntries, setPreviewPath]
+  );
+
   const handleRowKeyDown = useCallback(
     (ev: ReactKeyboardEvent) => {
       const L = visibleEntries.length;
@@ -1233,6 +1246,7 @@ const stepForward = useCallback(() => {
           focusRow(n);
         } else {
           selectOnly(n);
+          syncPreview(n);
         }
       };
       switch (ev.key) {
@@ -1245,13 +1259,19 @@ const stepForward = useCallback(() => {
         case "Home":
           ev.preventDefault();
           if (shift) setRange(anchor.current < 0 ? i : anchor.current, 0, true);
-          else selectOnly(0);
+          else {
+            selectOnly(0);
+            syncPreview(0);
+          }
           break;
         case "End":
           ev.preventDefault();
           if (shift)
             setRange(anchor.current < 0 ? i : anchor.current, L - 1, true);
-          else selectOnly(L - 1);
+          else {
+            selectOnly(L - 1);
+            syncPreview(L - 1);
+          }
           break;
         case "PageDown":
           move(i + pageStep());
@@ -1278,6 +1298,7 @@ const stepForward = useCallback(() => {
       openItem,
       goUp,
       focusRow,
+      syncPreview,
     ]
   );
 
