@@ -615,15 +615,17 @@ input { font: inherit; user-select: text; }
   display: flex;
   align-items: center;
   gap: 7px;
+  width: 118px;
   height: var(--ctl);
   padding: 0 10px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   color: var(--text-3);
-  transition: border-color 120ms ease, box-shadow 120ms ease;
+  transition: border-color 120ms ease, box-shadow 120ms ease, width 180ms ease;
 }
 .tag-input-wrap:focus-within {
+  width: 100%;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
