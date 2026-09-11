@@ -1698,23 +1698,25 @@ const stepForward = useCallback(() => {
                   <div className="fav-menu-empty">暂无收藏</div>
                 ) : (
                   favorites.map((p) => (
-                    <button
-                      key={p}
-                      role="menuitem"
-                      className={`fav-item ${p === path ? "cur" : ""}`}
-                      onClick={(ev) => {
-                        ev.stopPropagation();
-                        setFavOpen(false);
-                        if (p !== path) void navigate(p);
-                      }}
-                      title={p}
-                    >
-                      <IconFolder size={14} className="fav-item-icon" />
-                      <span className="fav-item-path">{p}</span>
-                      <span
+                    // 行容器不承担交互：路径与删除各自是独立的 menuitem，
+                    // 避免此前「删除按钮（role=button）嵌套在按钮内」的非法结构与键盘不可达
+                    <div key={p} className={`fav-item ${p === path ? "cur" : ""}`}>
+                      <button
+                        role="menuitem"
+                        className="fav-item-main"
+                        title={p}
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          setFavOpen(false);
+                          if (p !== path) void navigate(p);
+                        }}
+                      >
+                        <IconFolder size={14} className="fav-item-icon" />
+                        <span className="fav-item-path">{p}</span>
+                      </button>
+                      <button
+                        role="menuitem"
                         className="fav-item-del"
-                        role="button"
-                        tabIndex={-1}
                         aria-label={`从收藏中移除 ${p}`}
                         title="从收藏中移除"
                         onClick={(ev) => {

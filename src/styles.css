@@ -400,14 +400,23 @@ input { font: inherit; user-select: text; }
 .fav-item {
   display: flex;
   align-items: center;
-  gap: 8px;
   width: 100%;
   min-width: 0;
-  padding: 7px 8px;
   border-radius: var(--r-sm);
   color: var(--text-2);
   text-align: left;
   transition: background 90ms ease, color 90ms ease;
+}
+/* 路径主体：承担原来的行内边距与点击区域，占满除删除按钮外的整行 */
+.fav-item-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 7px 8px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
 }
 .fav-item:hover { background: var(--surface-3); color: var(--text); }
 .fav-item.cur { color: var(--accent-text); font-weight: 600; }
@@ -420,6 +429,7 @@ input { font: inherit; user-select: text; }
   justify-content: center;
   width: 16px;
   height: 16px;
+  margin-right: 8px;
   border-radius: var(--r-sm);
   font-size: 14px;
   line-height: 1;
@@ -427,7 +437,10 @@ input { font: inherit; user-select: text; }
   visibility: hidden;
   transition: background 90ms ease, color 90ms ease;
 }
-.fav-item:hover .fav-item-del { visibility: visible; }
+/* 悬停或键盘焦点进入本行时显示删除按钮：visibility:hidden 的元素无法被 Tab 聚焦，
+   若不随焦点显示，键盘用户就永远删不掉收藏 */
+.fav-item:hover .fav-item-del,
+.fav-item:focus-within .fav-item-del { visibility: visible; }
 .fav-item-del:hover { background: var(--surface-3); color: var(--danger, #e5484d); }
 
 /* 地址栏：Windows 资源管理器风格，可点击面包屑，也可切到文本框输入（含 UNC/SMB） */
