@@ -65,12 +65,21 @@ impl History {
         self.undo.lock().unwrap().pop()
     }
 
+    /// 窥视栈顶但不取出：撤销/重做需先执行成功才真正出栈，否则会静默丢历史。
+    fn peek_undo(&self) -> Option<HistoryOp> {
+        self.undo.lock().unwrap().last().cloned()
+    }
+
     fn push_redo(&self, op: HistoryOp) {
         self.redo.lock().unwrap().push(op);
     }
 
     fn pop_redo(&self) -> Option<HistoryOp> {
         self.redo.lock().unwrap().pop()
+    }
+
+    fn peek_redo(&self) -> Option<HistoryOp> {
+        self.redo.lock().unwrap().last().cloned()
     }
 
     fn can_undo(&self) -> bool {
@@ -104,6 +113,26 @@ fn sanitize_sep(input: &str) -> Option<char> {
     input
         .chars()
         .find(|c| !c.is_whitespace() && !SEP_FORBIDDEN.contains(c))
+}
+
+/// 校验并规范化标签：trim → 剔除分隔符字符；空标签或含非法文件名字符则返回 None。
+/// 非法字符跨平台一律拒绝（即使 macOS 允许 `:` 等），避免同一标签在不同系统表现不一致。
+/// 纯逻辑：可独立单元测试。
+fn sanitize_tag(tag: &str, sep: char) -> Option<String> {
+    if tag.chars().any(|c| SEP_FORBIDDEN.contains(&c)) {
+        return None;
+    }
+    let cleaned: String = tag.trim().chars().filter(|c| *c != sep).collect();
+    let cleaned = cleaned.trim().to_string();
+    if cleaned.is_empty() {
+        return None;
+    }
+    Some(cleaned)
+}
+
+/// 文件名中是否已含该标签。用于打标签的幂等去重，避免写出 `a#x#x`。
+fn tag_already_present(entry: &FileEntry, tag: &str) -> bool {
+    entry.tags.iter().any(|t| t == tag)
 }
 
 /// 标签分隔符配置（内存态）。持久化由前端 `zeta.settings` 负责；
@@ -200,10 +229,14 @@ fn list_dir(path: String, tag_settings: State<TagSettings>) -> Result<Vec<FileEn
     for item in read.flatten() {
         let full = item.path();
         let name = item.file_name().to_string_lossy().to_string();
-        let file_type = item.file_type().map_err(|e| e.to_string())?;
+        // 元数据读取失败（如悬空符号链接：macOS/Linux 上 metadata 跟随软链）时跳过该条目，
+        // 不能因单个坏项让整个目录报错——前端会把列目录失败当成不可读并回退到父目录。
+        let Ok(file_type) = item.file_type() else {
+            continue;
+        };
         let is_dir = file_type.is_dir();
 
-        let meta = item.metadata().map_err(|e| e.to_string())?;
+        let Ok(meta) = item.metadata() else { continue };
 
         // 过滤系统/隐藏文件，保持列表干净
         if is_system_file(&meta, &name) {
@@ -364,11 +397,16 @@ fn add_tag(
     tag_settings: State<TagSettings>,
 ) -> Result<String, String> {
     let sep = *tag_settings.sep.lock().unwrap();
-    let sanitized: String = tag.chars().filter(|c| *c != sep).collect();
-    if sanitized.trim().is_empty() {
-        return Err("标签不能为空".to_string());
+    // 非法字符与空标签分开报错：前者是输入内容问题，后者是没填
+    if tag.chars().any(|c| SEP_FORBIDDEN.contains(&c)) {
+        return Err("标签不能包含 \\ / : * ? \" < > | 等字符".to_string());
     }
+    let sanitized = sanitize_tag(&tag, sep).ok_or("标签不能为空")?;
     let entry = build_entry(&path, sep)?;
+    // 幂等：已含同名标签就不改名，直接返回原路径（前端依赖返回路径恢复选中）
+    if tag_already_present(&entry, &sanitized) {
+        return Ok(path);
+    }
     let new_name = build_new_name(&entry, &sanitized, sep);
     let new_path = sibling_path(&path, &new_name);
     do_rename(&state, &path, &new_path)?;
@@ -430,92 +468,106 @@ fn set_tag_separator(sep: String, tag_settings: State<TagSettings>) -> Result<()
     Ok(())
 }
 
-/// 撤销上一步操作。
-#[tauri::command(async)]
-fn undo(state: State<History>) -> Result<(), String> {
-    let op = state
-        .pop_undo()
-        .ok_or_else(|| "没有可撤销的操作".to_string())?;
+/// 应用一条撤销操作（纯逻辑，不依赖 Tauri 运行时，便于单测失败路径）。
+/// 调用方须在本函数返回 Ok 后才出栈，否则校验失败会把条目从历史里吞掉。
+fn apply_undo(op: &HistoryOp) -> Result<(), String> {
     match op {
         HistoryOp::Rename { from, to } => {
-            if Path::new(&from).exists() {
+            if Path::new(from).exists() {
                 return Err(format!("无法撤销：源文件已存在：{}", from));
             }
-            fs::rename(&to, &from).map_err(|e| e.to_string())?;
-            state.push_redo(HistoryOp::Rename { from, to });
+            fs::rename(to, from).map_err(|e| e.to_string())?;
         }
         HistoryOp::DissolveFolder { folder, moved } => {
             // 撤销 = 重建文件夹 + 把子项从 parent 移回 folder
-            if Path::new(&folder).exists() {
+            if Path::new(folder).exists() {
                 return Err(format!("无法撤销：文件夹仍存在：{}", folder));
             }
-            fs::create_dir(&folder).map_err(|e| e.to_string())?;
-            for (from, to) in &moved {
+            fs::create_dir(folder).map_err(|e| e.to_string())?;
+            for (from, to) in moved {
                 // from = folder/child（原）, to = parent/child（现）
                 fs::rename(to, from).map_err(|e| e.to_string())?;
             }
-            state.push_redo(HistoryOp::DissolveFolder { folder, moved });
         }
         HistoryOp::CollectFolder { folder, moved } => {
             // 撤销 = 把子项从 folder 移回原位 + 删空壳
-            if !Path::new(&folder).exists() {
+            if !Path::new(folder).exists() {
                 return Err(format!("无法撤销：文件夹不存在：{}", folder));
             }
-            for (from, to) in &moved {
+            for (from, to) in moved {
                 // from = parent/item（原）, to = folder/item（现）
                 fs::rename(to, from).map_err(|e| e.to_string())?;
             }
-            fs::remove_dir(&folder).map_err(|e| e.to_string())?;
-            state.push_redo(HistoryOp::CollectFolder { folder, moved });
+            fs::remove_dir(folder).map_err(|e| e.to_string())?;
         }
     }
     Ok(())
 }
 
-/// 重做被撤销的操作。
-#[tauri::command(async)]
-fn redo(state: State<History>) -> Result<(), String> {
-    let op = state
-        .pop_redo()
-        .ok_or_else(|| "没有可重做的操作".to_string())?;
+/// 应用一条重做操作（纯逻辑，不依赖 Tauri 运行时）。
+fn apply_redo(op: &HistoryOp) -> Result<(), String> {
     match op {
         HistoryOp::Rename { from, to } => {
-            if Path::new(&to).exists() {
+            if Path::new(to).exists() {
                 return Err(format!("无法重做：目标文件已存在：{}", to));
             }
-            fs::rename(&from, &to).map_err(|e| e.to_string())?;
-            state.push_undo(HistoryOp::Rename { from, to });
+            fs::rename(from, to).map_err(|e| e.to_string())?;
         }
         HistoryOp::DissolveFolder { folder, moved } => {
             // 重做 = 重新移动子项 + 删空壳
-            if !Path::new(&folder).exists() {
+            if !Path::new(folder).exists() {
                 return Err(format!("无法重做：文件夹不存在：{}", folder));
             }
-            for (from, to) in &moved {
+            for (from, to) in moved {
                 // from = folder/child（原）, to = parent/child（现）
                 if Path::new(to).exists() {
                     return Err(format!("无法重做：目标已存在：{}", to));
                 }
                 fs::rename(from, to).map_err(|e| e.to_string())?;
             }
-            fs::remove_dir(&folder).map_err(|e| e.to_string())?;
-            state.push_undo(HistoryOp::DissolveFolder { folder, moved });
+            fs::remove_dir(folder).map_err(|e| e.to_string())?;
         }
         HistoryOp::CollectFolder { folder, moved } => {
             // 重做 = 重建文件夹 + 重新把子项移入
-            if Path::new(&folder).exists() {
+            if Path::new(folder).exists() {
                 return Err(format!("无法重做：文件夹已存在：{}", folder));
             }
-            fs::create_dir(&folder).map_err(|e| e.to_string())?;
-            for (from, to) in &moved {
+            fs::create_dir(folder).map_err(|e| e.to_string())?;
+            for (from, to) in moved {
                 // from = parent/item（原）, to = folder/item（现）
                 if Path::new(to).exists() {
                     return Err(format!("无法重做：目标已存在：{}", to));
                 }
                 fs::rename(from, to).map_err(|e| e.to_string())?;
             }
-            state.push_undo(HistoryOp::CollectFolder { folder, moved });
         }
+    }
+    Ok(())
+}
+
+/// 撤销上一步操作。
+/// 先窥视再执行，成功后才出栈并压入重做栈：失败时条目留在撤销栈里可重试。
+#[tauri::command(async)]
+fn undo(state: State<History>) -> Result<(), String> {
+    let op = state
+        .peek_undo()
+        .ok_or_else(|| "没有可撤销的操作".to_string())?;
+    apply_undo(&op)?;
+    if let Some(done) = state.pop_undo() {
+        state.push_redo(done);
+    }
+    Ok(())
+}
+
+/// 重做被撤销的操作。同 undo：失败不丢历史条目。
+#[tauri::command(async)]
+fn redo(state: State<History>) -> Result<(), String> {
+    let op = state
+        .peek_redo()
+        .ok_or_else(|| "没有可重做的操作".to_string())?;
+    apply_redo(&op)?;
+    if let Some(done) = state.pop_redo() {
+        state.push_undo(done);
     }
     Ok(())
 }
@@ -1200,5 +1252,222 @@ mod tests {
             HistoryOp::Rename { from, to } => Some((from, to)),
             _ => None,
         }
+    }
+
+    #[test]
+    fn sanitize_tag_trims_and_strips_separator() {
+        assert_eq!(sanitize_tag("工作", '#'), Some("工作".to_string()));
+        assert_eq!(sanitize_tag("  工作  ", '#'), Some("工作".to_string()));
+        // 手输 "a#b" 时分隔符被剔除，避免写出 a#b 这种被解析成两个标签的名字
+        assert_eq!(sanitize_tag("a#b", '#'), Some("ab".to_string()));
+        assert_eq!(sanitize_tag(" # ", '#'), None); // 只有空白与分隔符
+    }
+
+    #[test]
+    fn sanitize_tag_rejects_empty_and_separator_only() {
+        assert_eq!(sanitize_tag("", '#'), None);
+        assert_eq!(sanitize_tag("   ", '#'), None);
+        assert_eq!(sanitize_tag("###", '#'), None);
+    }
+
+    #[test]
+    fn sanitize_tag_rejects_forbidden_chars() {
+        for c in SEP_FORBIDDEN {
+            let tag = format!("a{}b", c);
+            assert_eq!(sanitize_tag(&tag, '#'), None, "应拒绝非法字符 {:?}", c);
+            // 前后空白不能掩盖非法字符
+            assert_eq!(sanitize_tag(&format!(" {} ", tag), '#'), None);
+        }
+    }
+
+    #[test]
+    fn sanitize_tag_uses_custom_separator() {
+        assert_eq!(sanitize_tag("a@b", '@'), Some("ab".to_string()));
+        // 非当前分隔符的字符应原样保留
+        assert_eq!(sanitize_tag("a@b", '#'), Some("a@b".to_string()));
+    }
+
+    #[test]
+    fn tag_already_present_detects_existing_tag() {
+        let e = entry("报告", "md", vec!["工作", "重要"]);
+        assert!(tag_already_present(&e, "工作"));
+        assert!(!tag_already_present(&e, "新标签"));
+        assert!(!tag_already_present(&e, "工")); // 部分匹配不算
+    }
+
+    #[test]
+    fn apply_undo_rename_moves_back() {
+        let root = std::env::temp_dir().join("zeta_apply_undo_rename");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let from = root.join("a.txt");
+        let to = root.join("a#标签.txt");
+        std::fs::write(&from, "a").unwrap();
+        std::fs::rename(&from, &to).unwrap();
+
+        let op = rename_op(&from.to_string_lossy(), &to.to_string_lossy());
+        apply_undo(&op).unwrap();
+        assert!(from.exists());
+        assert!(!to.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn apply_undo_rename_fails_without_side_effect() {
+        let root = std::env::temp_dir().join("zeta_apply_undo_rename_fail");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let from = root.join("a.txt");
+        let to = root.join("a#标签.txt");
+        std::fs::write(&to, "已改名").unwrap();
+        // 源路径被重新占位 → 撤销必须失败
+        std::fs::write(&from, "占位").unwrap();
+
+        let op = rename_op(&from.to_string_lossy(), &to.to_string_lossy());
+        assert!(apply_undo(&op).is_err());
+        // 失败不产生副作用：两边内容原样
+        assert_eq!(std::fs::read_to_string(&from).unwrap(), "占位");
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "已改名");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn apply_redo_rename_moves_forward() {
+        let root = std::env::temp_dir().join("zeta_apply_redo_rename");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let from = root.join("a.txt");
+        let to = root.join("a#标签.txt");
+        std::fs::write(&from, "a").unwrap();
+
+        let op = rename_op(&from.to_string_lossy(), &to.to_string_lossy());
+        apply_redo(&op).unwrap();
+        assert!(to.exists());
+        assert!(!from.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn apply_redo_rename_fails_when_target_exists() {
+        let root = std::env::temp_dir().join("zeta_apply_redo_rename_fail");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let from = root.join("a.txt");
+        let to = root.join("a#标签.txt");
+        std::fs::write(&from, "原文件").unwrap();
+        std::fs::write(&to, "占位").unwrap();
+
+        let op = rename_op(&from.to_string_lossy(), &to.to_string_lossy());
+        assert!(apply_redo(&op).is_err());
+        // 失败不产生副作用
+        assert_eq!(std::fs::read_to_string(&from).unwrap(), "原文件");
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "占位");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn apply_undo_redo_roundtrip_dissolve_folder() {
+        let root = std::env::temp_dir().join("zeta_apply_dissolve_roundtrip");
+        let _ = std::fs::remove_dir_all(&root);
+        let folder = root.join("outer");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("a.txt"), "a").unwrap();
+
+        let moved = dissolve_folder_inner(&folder).unwrap();
+        let op = HistoryOp::DissolveFolder {
+            folder: folder.to_string_lossy().to_string(),
+            moved,
+        };
+
+        // 撤销：重建空壳 + 子项回到 folder
+        apply_undo(&op).unwrap();
+        assert!(folder.join("a.txt").exists());
+        assert!(!root.join("a.txt").exists());
+
+        // 重做：再次解散
+        apply_redo(&op).unwrap();
+        assert!(!folder.exists());
+        assert!(root.join("a.txt").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn apply_undo_redo_roundtrip_collect_folder() {
+        let root = std::env::temp_dir().join("zeta_apply_collect_roundtrip");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let a = root.join("a.txt");
+        std::fs::write(&a, "a").unwrap();
+
+        let (folder, moved) =
+            collect_into_folder_inner(&[a.to_string_lossy().to_string()], "newfolder").unwrap();
+        let op = HistoryOp::CollectFolder {
+            folder: folder.clone(),
+            moved,
+        };
+        assert!(!a.exists());
+
+        // 撤销：子项回原位 + 删空壳
+        apply_undo(&op).unwrap();
+        assert!(a.exists());
+        assert!(!Path::new(&folder).exists());
+
+        // 重做：重建文件夹 + 重新移入
+        apply_redo(&op).unwrap();
+        assert!(Path::new(&folder).join("a.txt").exists());
+        assert!(!a.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn history_peek_does_not_consume() {
+        let h = History::new();
+        assert!(h.peek_undo().is_none());
+        assert_eq!(h.can_undo(), h.peek_undo().is_some());
+
+        h.record(rename_op("a.txt", "b.txt"));
+        // peek 两次都能拿到同一条
+        for _ in 0..2 {
+            let peeked = h.peek_undo().unwrap();
+            let (f, t) = as_rename(&peeked).unwrap();
+            assert_eq!((f, t), ("a.txt", "b.txt"));
+        }
+        // 未消费：仍可撤销，pop 才真正出栈
+        assert!(h.can_undo());
+        let popped = h.pop_undo().unwrap();
+        let (f, t) = as_rename(&popped).unwrap();
+        assert_eq!((f, t), ("a.txt", "b.txt"));
+        assert!(!h.can_undo());
+
+        // redo 栈同理
+        h.push_redo(popped);
+        assert!(h.peek_redo().is_some());
+        assert!(h.can_redo());
+        assert!(h.peek_redo().is_some());
+    }
+
+    /// 命令层流程（peek → apply → 成功才出栈）在 apply 失败时不得丢历史。
+    #[test]
+    fn failed_undo_keeps_history_entry() {
+        let root = std::env::temp_dir().join("zeta_failed_undo_keeps_history");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let from = root.join("a.txt");
+        let to = root.join("a#标签.txt");
+        std::fs::write(&from, "a").unwrap();
+        std::fs::rename(&from, &to).unwrap();
+
+        let h = History::new();
+        h.record(rename_op(&from.to_string_lossy(), &to.to_string_lossy()));
+        // 让撤销注定失败
+        std::fs::write(&from, "占位").unwrap();
+
+        let op = h.peek_undo().expect("有可撤销项");
+        assert!(apply_undo(&op).is_err());
+        // 关键断言：失败后历史条目仍在，未被吞掉
+        assert!(h.can_undo());
+        assert!(h.peek_undo().is_some());
+        assert!(!h.can_redo());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
