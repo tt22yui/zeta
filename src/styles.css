@@ -615,7 +615,8 @@ input { font: inherit; user-select: text; }
   display: flex;
   align-items: center;
   gap: 7px;
-  width: 118px;
+  width: 92%;
+  margin: 0 auto;
   height: var(--ctl);
   padding: 0 10px;
   background: var(--surface);
