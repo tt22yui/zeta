@@ -37,6 +37,8 @@ function formatTime(sec: number): string {
 type PreviewPaneProps = {
   entry: FileEntry | null;
   onClose: () => void;
+  /** 需要用户可见的错误提示时回调（预览面板自身没有 toast 通道） */
+  onNotice?: (message: string) => void;
 };
 
 /**
@@ -45,7 +47,7 @@ type PreviewPaneProps = {
  * 按扩展名分发：图片/视频/音频/PDF 走 asset 协议直链，文本走后端 read_text_preview
  * （截断到 1 MiB），其他格式显示文件元信息 + 「无法预览此格式」。
  */
-export default function PreviewPane({ entry, onClose }: PreviewPaneProps) {
+export default function PreviewPane({ entry, onClose, onNotice }: PreviewPaneProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [textContent, setTextContent] = useState<{ text: string; truncated: boolean } | null>(null);
@@ -189,9 +191,11 @@ export default function PreviewPane({ entry, onClose }: PreviewPaneProps) {
               const href = a.getAttribute("href") ?? "";
               if (!href || href.startsWith("#")) return;
               const isWeb = /^(https?:|mailto:|tel:)/i.test(href);
-              void (isWeb ? openUrlInDefault(href) : openInDefault(href)).catch((err) =>
-                console.error("打开链接失败:", err)
-              );
+              void (isWeb ? openUrlInDefault(href) : openInDefault(href)).catch((err) => {
+                // 面板内没有提示通道，交给上层统一提示，避免"点了没反应"
+                if (onNotice) onNotice(`打开链接失败：${err}`);
+                else console.error("打开链接失败:", err);
+              });
             }}
             dangerouslySetInnerHTML={{ __html: mdHtml }}
           />

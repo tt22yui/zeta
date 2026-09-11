@@ -97,11 +97,15 @@ export function tagColor(tag: string): string {
   return color;
 }
 
+/** 拖拽图标缓存：图形固定，避免每次拖拽都新建 canvas 并做 PNG 编码 */
+let dragIconCache: string | null = null;
+
 /**
  * 生成原生拖拽的预览图标（透明 PNG data URI）。原生拖拽必须携带一张图片，
  * 这里用 canvas 画一个「文件堆叠」图形，避免依赖磁盘上的额外资源，任意文件类型通用。
  */
 function makeDragIcon(): string {
+  if (dragIconCache !== null) return dragIconCache;
   const c = document.createElement("canvas");
   c.width = 64;
   c.height = 64;
@@ -139,8 +143,10 @@ function makeDragIcon(): string {
     ctx.lineTo(37, 32);
     ctx.stroke();
   }
-  return c.toDataURL("image/png");
+  dragIconCache = c.toDataURL("image/png");
+  return dragIconCache;
 }
+
 
 /** 常见扩展名 -> 类型名 + 主题色，用于统一的文件类型图标 */
 const EXT_STYLE: Record<string, { label: string; color: string }> = {
@@ -485,19 +491,19 @@ export default function App() {
   }, [path, settings.addrHistLimit]);
 
   useEffect(() => {
-    // 启动早期后端/IPC 可能尚未就绪，get_drives 一次失败就永久为空会让
-    // 盘符下拉不可用；这里失败自动重试，直到拿到盘符或达到上限
+    // 启动早期后端/IPC 可能尚未就绪，get_drives 失败会让盘符下拉永久为空，故失败自动重试；
+    // 但「成功返回空」是有效答案（macOS 本就没有盘符），不能再重试 —— 否则白等 3 秒并多发 5 次 IPC
     let stop = false;
     const loadDrives = async () => {
       for (let i = 0; i < 6; i++) {
         try {
           const d = await getDrives();
           if (!stop) setDrives(d);
-          if (d.length > 0) return;
+          return;
         } catch {
           /* 后端未就绪，稍后重试 */
         }
-        await new Promise((r) => setTimeout(r, 500));
+        if (i < 5) await new Promise((r) => setTimeout(r, 500));
       }
     };
     void loadDrives();
@@ -2294,7 +2300,11 @@ const stepForward = useCallback(() => {
       )}
 
       {/* 空格预览面板：右侧抽屉式浮层 */}
-      <PreviewPane entry={previewEntry} onClose={() => setPreviewPath(null)} />
+      <PreviewPane
+        entry={previewEntry}
+        onClose={() => setPreviewPath(null)}
+        onNotice={(msg) => showNotice("error", msg)}
+      />
 
       {/* 集中式弹窗：确认框（原生 confirm 替代） */}
       {dialog?.kind === "confirm" && (
