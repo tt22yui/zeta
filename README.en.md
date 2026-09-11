@@ -21,6 +21,11 @@ A lightweight, cross-platform desktop file manager. Its core highlight is a **fi
   - Arrow keys to move the selection, `Shift` for range multi-select, `Ctrl` (macOS `⌘`) to move the cursor only
   - `Ctrl+A` select all · `Esc` clear · `Enter` open · `←` parent
   - `F2` inline rename · `F5` refresh · type characters to jump by name prefix
+- **Space preview**: images / video / audio (with spectrum) / PDF / Markdown rich text / text (first 1 MiB); the preview follows the keyboard cursor.
+- **Folder utilities**: dissolve a folder (children move up, empty shell removed) and collect items into a new folder.
+- **Omnibar address bar**: type a path directly (`~` expands to home), with visit history and favorite paths.
+- **Settings panel**: theme (system / light / dark), address-bar history size, restore last path on launch, tag separator.
+- **Drag to external apps**: drags carry real file handles, so dropping into Explorer / Feishu / WeCom works.
 - **Cross-platform frameless window**: custom title bar with Windows/Linux right-side controls and macOS traffic-light buttons.
 
 ## Tech Stack
