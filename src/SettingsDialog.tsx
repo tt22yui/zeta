@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import { Dialog, DialogBackdrop, DialogPanel, DialogTitle, Transition } from "@headlessui/react";
+import { ConfirmDialog } from "./Dialog";
 import type { Settings, ThemeMode } from "./settings";
 
 export type SettingsDialogProps = {
@@ -16,6 +18,25 @@ const THEME_OPTIONS: { value: ThemeMode; label: string }[] = [
 
 export function SettingsDialog(props: SettingsDialogProps) {
   const { open, settings, onChange, onClose } = props;
+
+  const [sepDraft, setSepDraft] = useState(settings.tagSeparator);
+  const [sepPending, setSepPending] = useState<string | null>(null);
+
+  // 每次打开或外部生效值变化时，重置草稿与待确认态
+  useEffect(() => {
+    if (open) {
+      setSepDraft(settings.tagSeparator);
+      setSepPending(null);
+    }
+  }, [open, settings.tagSeparator]);
+
+  // 输入即触发确认：与当前生效值不同且非空时，弹警告框等待确认
+  const onSepInput = (value: string) => {
+    setSepDraft(value);
+    const next = value.trim();
+    if (!next || next === settings.tagSeparator) return;
+    setSepPending(next);
+  };
 
   return (
     <Transition appear show={open}>
@@ -118,8 +139,8 @@ export function SettingsDialog(props: SettingsDialogProps) {
                 <input
                   id="zeta-set-tag-sep"
                   className="set-input set-input-sep"
-                  value={settings.tagSeparator}
-                  onChange={(e) => onChange({ tagSeparator: e.target.value })}
+                  value={sepDraft}
+                  onChange={(e) => onSepInput(e.target.value)}
                   maxLength={2}
                 />
               </div>
@@ -139,6 +160,27 @@ export function SettingsDialog(props: SettingsDialogProps) {
                 关闭
               </button>
             </div>
+
+            <ConfirmDialog
+              open={sepPending !== null}
+              danger
+              title="修改标签分隔符？"
+              confirmLabel="修改"
+              message={
+                `分隔符将从 “${settings.tagSeparator}” 改为 “${sepPending ?? settings.tagSeparator}”。\n` +
+                "修改后，已用旧分隔符标记的标签将不再被识别，可能显示为普通文件名。"
+              }
+              onConfirm={() => {
+                const next = sepPending ?? settings.tagSeparator;
+                setSepPending(null);
+                setSepDraft(next);
+                onChange({ tagSeparator: next });
+              }}
+              onCancel={() => {
+                setSepPending(null);
+                setSepDraft(settings.tagSeparator);
+              }}
+            />
           </DialogPanel>
         </div>
       </Dialog>
