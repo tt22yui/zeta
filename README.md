@@ -72,7 +72,7 @@ npm run tauri dev
 仓库已配置 `.github/workflows/release.yml`：推送到 `v*` 格式的标签时，自动在 Windows / macOS 上构建并上传到 GitHub Releases。
 
 ```bash
-git tag v0.1.5
+git tag v0.1.6
 git push origin --tags
 ```
 

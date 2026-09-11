@@ -72,7 +72,7 @@ npm run tauri dev
 The repo ships a `.github/workflows/release.yml`: pushing a `v*` tag automatically builds on Windows / macOS and uploads to GitHub Releases.
 
 ```bash
-git tag v0.1.5
+git tag v0.1.6
 git push origin --tags
 ```
 
