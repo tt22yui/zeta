@@ -3,6 +3,8 @@ name = "zeta"
 version = "0.1.5"
 description = "A file tagging tool"
 authors = ["you"]
+license = "Apache-2.0"
+repository = "https://github.com/tt22yui/zeta"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

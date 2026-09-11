@@ -12,7 +12,67 @@ permissions:
   contents: write
 
 jobs:
+  # 标签发布前的质量闸门：前端类型检查。
+  # 说明：Linux 上跑 cargo test 需要 webkit2gtk/librsvg 等系统依赖，未安装会直接失败，
+  # 因此 ubuntu 只做类型检查，后端测试交给无需额外系统库的 Windows runner（见 verify-backend）。
+  verify:
+    runs-on: ubuntu-latest
+    # 校验只读取代码，收窄顶层 contents: write
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      - name: 前端类型检查
+        run: npx tsc --noEmit
+
+  # 后端测试：Windows runner 自带 WebView2，无需额外系统依赖
+  verify-backend:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: 安装 Rust（stable）
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust 依赖缓存
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri"
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      # tauri::generate_context! 在编译期读取 frontendDist（../dist），缺失会导致编译失败
+      - name: 构建前端（供 generate_context! 读取）
+        run: npm run build
+
+      - name: 后端测试
+        working-directory: src-tauri
+        run: cargo test
+
   build-and-publish:
+    # 质量闸门：类型检查与后端测试都通过后才构建发布，避免把红灯状态打上标签发出去
+    needs: [verify, verify-backend]
     strategy:
       # macOS 构建偶尔超时，避免一个平台失败拖垮全部
       fail-fast: false
@@ -34,8 +94,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
-        with:
-          lfs: true
 
       - name: 安装 Node.js
         uses: actions/setup-node@v5
