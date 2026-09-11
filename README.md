@@ -19,11 +19,9 @@
 - **彩色类型图标**：按扩展名区分文件类型，视觉上快速定位。
 - **完整的键盘导航**：与系统资源管理器一致的交互体验。
   - 方向键移动选中，`Shift` 范围多选，`Ctrl`(macOS `⌘`) 仅移动光标
-  - `Ctrl+A` 全选 · `Esc` 清除 · `Enter` 打开 · `←` 上级 · `Del` 删除到回收站
+  - `Ctrl+A` 全选 · `Esc` 清除 · `Enter` 打开 · `←` 上级
   - `F2` 行内重命名 · `F5` 刷新 · 直接敲字符按名称前缀定位
-- **撤销/重做**：打标签、删标签、重命名均录入撤销栈，误操作可回退。
 - **跨平台无边框窗口**：自定义标题栏，Windows/Linux 右侧控制、macOS traffic-light 红绿灯。
-- **删除进回收站**：`Delete` 走系统回收站，不误删、不记录撤销栈。
 
 ## 技术栈
 
@@ -32,7 +30,7 @@
 | 桌面框架 | Tauri 2（Rust） |
 | 前端 | React 18 + TypeScript + Vite 5 |
 | 后端 | Rust，文件操作通过 `#[tauri::command]` 暴露 |
-| 打包 | `tauri-bundler`（nsis / dmg / 等） |
+| 打包 | `tauri-bundler`（macOS 产出 dmg；Windows 只产绿色 exe 并手动压 zip，不生成安装包） |
 
 ## 标签约定
 
@@ -59,7 +57,8 @@ npm run tauri dev
 | 命令 | 说明 |
 | --- | --- |
 | `npm run tauri dev` | 开发模式运行 |
-| `npm run tauri build` | 构建并打包发行版 |
+| `npm run tauri build` | 构建发行版（macOS 产出 dmg） |
+| `npm run tauri build -- --no-bundle` | Windows 绿色包：不生成任何安装包（含 NSIS），随后手动把 `target/release/zeta.exe` 压成 `Zeta-win64-v<版本号>.zip` |
 | `cargo check`（在 `src-tauri/`） | 检查 Rust 编译错误 |
 | `tsc --noEmit` | 检查前端类型错误 |
 
@@ -68,7 +67,7 @@ npm run tauri dev
 仓库已配置 `.github/workflows/release.yml`：推送到 `v*` 格式的标签时，自动在 Windows / macOS 上构建并上传到 GitHub Releases。
 
 ```bash
-git tag v0.1.0
+git tag v0.1.5
 git push origin --tags
 ```
 
@@ -79,12 +78,20 @@ git push origin --tags
 | 命令 | 作用 |
 | --- | --- |
 | `list_dir` | 列出目录内容并解析标签 |
+| `list_subdirs` | 列出子文件夹完整路径（地址栏面包屑下钻） |
 | `get_drives` | 获取 Windows 盘符（跨平台返回空） |
 | `get_default_dir` | 默认打开目录（下载目录回退到家目录） |
+| `get_home_dir` | 用户主目录（地址栏 `~` 展开） |
 | `add_tag` / `remove_tag` | 打标签 / 删标签（重命名 + 入撤销栈） |
+| `set_tag_separator` | 同步标签分隔符到后端内存态（持久化由前端负责） |
 | `rename_file` | 重命名（入撤销栈） |
-| `delete_file` | 移动到回收站（不入撤销栈） |
+| `delete_file` | 移动到回收站（UNC 路径改为永久删除，不入撤销栈） |
+| `dissolve_folder` | 解散文件夹：子项上移到上级并删除空壳（可撤销） |
+| `collect_into_folder` | 收入文件夹：新建文件夹并把选中项移入（可撤销） |
+| `read_text_preview` | 读取文本文件前 1 MiB 用于预览面板 |
 | `undo` / `redo` / `can_undo` / `can_redo` | 撤销栈操作与查询 |
+
+> 说明：`undo` / `redo` / `delete_file` 后端已实现并注册，但界面尚未接入（无 `Ctrl+Z` / `Delete` 快捷键与菜单项），进度见 [PLAN.md](PLAN.md)。
 
 ## 目录结构
 

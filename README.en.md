@@ -19,11 +19,9 @@ A lightweight, cross-platform desktop file manager. Its core highlight is a **fi
 - **Colored type icons**: distinguish file types by extension for quick visual scanning.
 - **Full keyboard navigation**: interaction consistent with the system file explorer.
   - Arrow keys to move the selection, `Shift` for range multi-select, `Ctrl` (macOS `⌘`) to move the cursor only
-  - `Ctrl+A` select all · `Esc` clear · `Enter` open · `←` parent · `Del` delete to Trash
+  - `Ctrl+A` select all · `Esc` clear · `Enter` open · `←` parent
   - `F2` inline rename · `F5` refresh · type characters to jump by name prefix
-- **Undo/Redo**: tagging, un-tagging, and renaming are all pushed onto the undo stack — mistakes can be reverted.
 - **Cross-platform frameless window**: custom title bar with Windows/Linux right-side controls and macOS traffic-light buttons.
-- **Delete to Trash**: `Delete` uses the system Recycle Bin — no accidental loss, and not recorded in the undo stack.
 
 ## Tech Stack
 
@@ -32,7 +30,7 @@ A lightweight, cross-platform desktop file manager. Its core highlight is a **fi
 | Desktop framework | Tauri 2 (Rust) |
 | Frontend | React 18 + TypeScript + Vite 5 |
 | Backend | Rust, file operations exposed via `#[tauri::command]` |
-| Packaging | `tauri-bundler` (nsis / dmg / etc.) |
+| Packaging | `tauri-bundler` (dmg on macOS; on Windows only a standalone exe, zipped manually — no installers) |
 
 ## Tag Conventions
 
@@ -59,7 +57,8 @@ npm run tauri dev
 | Command | Description |
 | --- | --- |
 | `npm run tauri dev` | Run in development mode |
-| `npm run tauri build` | Build and package a release |
+| `npm run tauri build` | Build a release (dmg on macOS) |
+| `npm run tauri build -- --no-bundle` | Windows portable build: produces no installers (including NSIS); zip `target/release/zeta.exe` into `Zeta-win64-v<version>.zip` manually |
 | `cargo check` (in `src-tauri/`) | Check for Rust compilation errors |
 | `tsc --noEmit` | Check frontend type errors |
 
@@ -68,7 +67,7 @@ npm run tauri dev
 The repo ships a `.github/workflows/release.yml`: pushing a `v*` tag automatically builds on Windows / macOS and uploads to GitHub Releases.
 
 ```bash
-git tag v0.1.0
+git tag v0.1.5
 git push origin --tags
 ```
 
@@ -79,12 +78,20 @@ git push origin --tags
 | Command | Purpose |
 | --- | --- |
 | `list_dir` | List directory contents and parse tags |
+| `list_subdirs` | List full paths of subfolders (breadcrumb drill-down) |
 | `get_drives` | Get Windows drive letters (empty on other platforms) |
 | `get_default_dir` | Default directory to open (Downloads, falling back to home) |
+| `get_home_dir` | User home directory (`~` expansion in the address bar) |
 | `add_tag` / `remove_tag` | Add / remove tags (rename + push to undo stack) |
+| `set_tag_separator` | Sync the tag separator to backend memory (persistence is frontend-side) |
 | `rename_file` | Rename (push to undo stack) |
-| `delete_file` | Move to Trash (not in the undo stack) |
+| `delete_file` | Move to Trash (permanent delete on UNC paths; not in the undo stack) |
+| `dissolve_folder` | Dissolve a folder: move children up and remove the empty shell (undoable) |
+| `collect_into_folder` | Collect into folder: create a folder and move the selected items in (undoable) |
+| `read_text_preview` | Read the first 1 MiB of a text file for the preview pane |
 | `undo` / `redo` / `can_undo` / `can_redo` | Undo-stack operations and queries |
+
+> Note: `undo` / `redo` / `delete_file` are implemented and registered in the backend, but not yet wired into the UI (no `Ctrl+Z` / `Delete` shortcuts or menu items). See [PLAN.md](PLAN.md).
 
 ## Project Structure
 
