@@ -4,7 +4,7 @@ import { Transition } from "@headlessui/react";
 import { Marked } from "marked";
 import DOMPurify from "dompurify";
 import type { FileEntry } from "./types";
-import { previewAssetUrl, readTextPreview } from "./api";
+import { openInDefault, openUrlInDefault, previewAssetUrl, readTextPreview } from "./api";
 import { IconClose, IconMusic, IconPause, IconPlay } from "./icons";
 
 // 预览支持的文件扩展名白名单（小写）
@@ -82,7 +82,9 @@ export default function PreviewPane({ entry, onClose }: PreviewPaneProps) {
     return () => {
       cancelled = true;
     };
-  }, [entry]);
+    // 依赖路径而非 entry 对象：reload 每次都会生成全新的 entry 对象，
+    // 若按对象身份比较，任何自动刷新（UNC 轮询下每 3 秒）都会重读 1 MiB 文本。
+  }, [entry?.path]);
 
   // Markdown 富文本：文本读取完成后渲染；失败时记录可读错误，用于回退源文本并提示定位
   const [mdHtml, setMdHtml] = useState("");
@@ -100,7 +102,8 @@ export default function PreviewPane({ entry, onClose }: PreviewPaneProps) {
       setMdHtml("");
       setMdError(String(err));
     }
-  }, [entry, textContent]);
+    // 同上传入路径而非对象：同路径的 entry 对象被 reload 换新时无需重新解析 Markdown
+  }, [entry?.path, textContent]);
 
   // 媒体加载失败：按 code 给出友好提示（4=格式不支持，3=损坏，2=读取失败）
   const handleMediaError = (e: React.SyntheticEvent<HTMLMediaElement>) => {
@@ -175,7 +178,23 @@ export default function PreviewPane({ entry, onClose }: PreviewPaneProps) {
         <div className="preview-loading">加载中…</div>
       ) : textContent ? mdHtml ? (
         <Fragment>
-          <div className="preview-markdown" dangerouslySetInnerHTML={{ __html: mdHtml }} />
+          <div
+            className="preview-markdown"
+            onClick={(ev) => {
+              const a = (ev.target as HTMLElement).closest("a");
+              if (!a) return;
+              // 预览里的链接不能在应用内导航：Webview 一旦跳走就回不来了（且无外部导航守卫），
+              // 因此统一拦截，交给系统默认应用打开
+              ev.preventDefault();
+              const href = a.getAttribute("href") ?? "";
+              if (!href || href.startsWith("#")) return;
+              const isWeb = /^(https?:|mailto:|tel:)/i.test(href);
+              void (isWeb ? openUrlInDefault(href) : openInDefault(href)).catch((err) =>
+                console.error("打开链接失败:", err)
+              );
+            }}
+            dangerouslySetInnerHTML={{ __html: mdHtml }}
+          />
           {textContent.truncated && <div className="preview-markdown-note">（内容已截断，仅显示前 1 MiB）</div>}
         </Fragment>
       ) : (
@@ -486,11 +505,15 @@ function escapeHtml(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
-/** 把 markdown 文本渲染为已净化的 HTML：相对路径图片解析到文件同目录并走 asset 协议 */
-function renderMarkdown(text: string, dir: string): string {
-  // 自定义图片渲染：相对路径解析到文件同目录并通过 asset 协议加载
-  // 注意 use({renderer}) 用 for...in 遍历，须传对象字面量（class 实例方法不可枚举，不生效）
+/** 目录 -> Marked 实例：renderer 需闭包捕获「文件所在目录」，按目录缓存，避免每次渲染都重新构造 */
+const MD_PARSERS = new Map<string, Marked>();
+
+function markdownParser(dir: string): Marked {
+  const cached = MD_PARSERS.get(dir);
+  if (cached) return cached;
   const md = new Marked();
+  // 自定义渲染：相对图片解析到文件同目录并通过 asset 协议加载；链接则按同目录解析成绝对路径
+  // 注意 use({renderer}) 用 for...in 遍历，须传对象字面量（class 实例方法不可枚举，不生效）
   md.use({
     renderer: {
       image: ({ href, title, text: alt }: { href?: string; title?: string | null; text?: string }) => {
@@ -500,8 +523,36 @@ function renderMarkdown(text: string, dir: string): string {
         }
         return `<img src="${escapeHtml(src)}" alt="${escapeHtml(alt ?? "")}"${title ? ` title="${escapeHtml(title)}"` : ""} loading="lazy">`;
       },
+      link: ({ href, title, text }: { href?: string; title?: string | null; text?: string }) => {
+        let url = href ?? "";
+        // 无 scheme 的相对链接解析为绝对路径：点击时由系统默认应用打开（不在 Webview 内导航）
+        if (url && !/^([a-z][a-z0-9+.-]*:|#|\/)/i.test(url)) {
+          url = joinPath(dir, url);
+        }
+        return `<a href="${escapeHtml(url)}"${title ? ` title="${escapeHtml(title)}"` : ""}>${text ?? ""}</a>`;
+      },
     },
   });
-  const raw = md.parse(text) as string;
-  return DOMPurify.sanitize(raw);
+  if (MD_PARSERS.size >= 32) MD_PARSERS.clear(); // 防御无界增长
+  MD_PARSERS.set(dir, md);
+  return md;
+}
+
+/** 把 markdown 文本渲染为已净化的 HTML：相对路径图片解析到文件同目录并走 asset 协议 */
+function renderMarkdown(text: string, dir: string): string {
+  const raw = markdownParser(dir).parse(text) as string;
+  // 预览内容来自任意本地文件，收紧默认白名单：禁止表单与可嵌入对象，降低 UI 欺骗面
+  return DOMPurify.sanitize(raw, {
+    FORBID_TAGS: [
+      "form",
+      "input",
+      "button",
+      "textarea",
+      "select",
+      "option",
+      "iframe",
+      "object",
+      "embed",
+    ],
+  });
 }

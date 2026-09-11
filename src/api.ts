@@ -1,5 +1,5 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type { FileEntry } from "./types";
 
@@ -75,6 +75,11 @@ export function canRedo(): Promise<boolean> {
 /** 用系统默认应用打开文件/文件夹（tauri-plugin-opener） */
 export function openInDefault(path: string): Promise<void> {
   return openPath(path);
+}
+
+/** 用系统默认应用打开 URL（http/https/mailto/tel，tauri-plugin-opener） */
+export function openUrlInDefault(url: string): Promise<void> {
+  return openUrl(url);
 }
 
 /** 写入文本到系统剪贴板（tauri-plugin-clipboard-manager） */
