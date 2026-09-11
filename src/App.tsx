@@ -1,4 +1,5 @@
 import {
+  memo,
   useCallback,
   useDeferredValue,
   useEffect,
@@ -7,7 +8,11 @@ import {
   useRef,
   useState,
 } from "react";
-import type { KeyboardEvent as ReactKeyboardEvent } from "react";
+import type {
+  DragEvent as ReactDragEvent,
+  KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
+} from "react";
 import { flushSync } from "react-dom";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
@@ -1516,6 +1521,64 @@ const stepForward = useCallback(() => {
     return () => window.removeEventListener("keydown", onKey, true);
   }, [goUp, openItem, cursor, visibleEntries, stepForward, startRename, reload]);
 
+  // 行组件的事件入口：每帧刷新为最新闭包（行组件只持有这个 ref，故 memo 命中时也不会用到旧状态）
+  const rowActionsRef = useRef<RowActions>({
+    attachRef: () => {},
+    dragStart: () => {},
+    click: () => {},
+    dblclick: () => {},
+    keydown: () => {},
+    contextMenu: () => {},
+    renameCommit: () => {},
+    renameCancel: () => {},
+    removeTag: () => {},
+  });
+  rowActionsRef.current = {
+    attachRef: (el, idx) => {
+      rowRefs.current[idx] = el;
+    },
+    dragStart: (ev, e) => {
+      // 取消 HTML5 拖拽，改用原生 OLE/NSDraggingSession 拖真实文件，
+      // 这样飞书/企微等要求真实文件句柄的外部应用才能接收。
+      ev.preventDefault();
+      const paths = selected.has(e.path) && selected.size > 1 ? [...selected] : [e.path];
+      startDrag({ item: paths, icon: makeDragIcon(), mode: "copy" }).catch((err) =>
+        console.error("原生拖拽失败:", err)
+      );
+    },
+    click: (ev, e, idx) => {
+      if (ev.shiftKey) {
+        if (anchor.current < 0) anchor.current = cursor >= 0 ? cursor : idx;
+        setRange(anchor.current, idx, true);
+        focusRow(idx);
+      } else if (ev.ctrlKey || ev.metaKey) {
+        toggleSelect(e, true);
+        setCursor(idx);
+        anchor.current = idx;
+        focusRow(idx);
+      } else {
+        selectOnly(idx);
+        // 预览已打开时跟随选中：点到文件切换预览、点到目录关闭预览。
+        // flushSync 在手势内同步挂载新媒体，保证带声自动播放
+        if (previewPath) flushSync(() => setPreviewPath(e.is_dir ? null : e.path));
+      }
+    },
+    dblclick: (e) => openItem(e),
+    keydown: handleRowKeyDown,
+    contextMenu: (ev, e) => {
+      ev.stopPropagation();
+      const target = ev.target as HTMLElement;
+      if (target.closest(".chip")) return; // 标签 chip 交给其自身的移除逻辑
+      openCtxMenu(ev.nativeEvent, e, selected);
+    },
+    renameCommit: () => void commitRename(),
+    renameCancel: () => {
+      renameCommitted.current = true;
+      setRenamingIdx(null);
+    },
+    removeTag: (e, t) => removeTagFrom(e, t),
+  };
+
   return (
     <div
       className="app"
@@ -2021,107 +2084,17 @@ const stepForward = useCallback(() => {
                 }}
               >
                 {visibleEntries.map((e, idx) => (
-                  <div
+                  <Row
                     key={e.path}
-                    ref={(el) => {
-                      rowRefs.current[idx] = el;
-                    }}
-                    tabIndex={idx === cursor ? 0 : -1}
-                    role="option"
-                    aria-selected={selected.has(e.path)}
-                    className={`row ${idx === cursor ? "focused" : ""} ${selected.has(e.path) ? "selected" : ""} ${dissolving.has(e.path) ? "row-dissolving" : ""}`}
-                    draggable={renamingIdx !== idx}
-                    onDragStart={(ev) => {
-                      // 取消 HTML5 拖拽，改用原生 OLE/NSDraggingSession 拖真实文件，
-                      // 这样飞书/企微等要求真实文件句柄的外部应用才能接收。
-                      ev.preventDefault();
-                      const paths =
-                        selected.has(e.path) && selected.size > 1
-                          ? [...selected]
-                          : [e.path];
-                      startDrag({ item: paths, icon: makeDragIcon(), mode: "copy" }).catch(
-                        (err) => console.error("原生拖拽失败:", err)
-                      );
-                    }}
-                    onClick={(ev) => {
-                      if (ev.shiftKey) {
-                        if (anchor.current < 0) anchor.current = cursor >= 0 ? cursor : idx;
-                        setRange(anchor.current, idx, true);
-                        focusRow(idx);
-                      } else if (ev.ctrlKey || ev.metaKey) {
-                        toggleSelect(e, true);
-                        setCursor(idx);
-                        anchor.current = idx;
-                        focusRow(idx);
-                      } else {
-                        selectOnly(idx);
-                        // 预览已打开时跟随选中：点到文件切换预览、点到目录关闭预览。
-                        // flushSync 在手势内同步挂载新媒体，保证带声自动播放
-                        if (previewPath) flushSync(() => setPreviewPath(e.is_dir ? null : e.path));
-                      }
-                    }}
-                    onDoubleClick={() => openItem(e)}
-                    onKeyDown={handleRowKeyDown}
-                    onContextMenu={(ev) => {
-                      ev.stopPropagation();
-                      const target = ev.target as HTMLElement;
-                      if (target.closest(".chip")) return; // 标签 chip 交给其自身的移除逻辑
-                      openCtxMenu(ev.nativeEvent, e, selected);
-                    }}
-                  >
-                    <span className="col name">
-                      <FileGlyph entry={e} />
-                      {idx === renamingIdx ? (
-                        <input
-                          ref={renameRef}
-                          className="rename-input"
-                          autoComplete="off"
-                          // 非受控：输入过程只改 DOM，不触发整表重渲染；提交时从 ref 取值
-                          defaultValue={e.name}
-                          onMouseDown={(ev2) => ev2.stopPropagation()}
-                          onDoubleClick={(ev2) => ev2.stopPropagation()}
-                          onClick={(ev2) => ev2.stopPropagation()}
-                          onKeyDown={(ev2) => {
-                            ev2.stopPropagation();
-                            if (ev2.key === "Enter") {
-                              ev2.preventDefault();
-                              commitRename();
-                            } else if (ev2.key === "Escape") {
-                              ev2.preventDefault();
-                              renameCommitted.current = true;
-                              setRenamingIdx(null);
-                            }
-                          }}
-                          onBlur={() => commitRename()}
-                          spellCheck={false}
-                        />
-                      ) : (
-                        <span className="filename">
-                          {e.tags.length > 0 ? e.base + (e.ext ? "." + e.ext : "") : e.name}
-                        </span>
-                      )}
-                    </span>
-                    <span className="col tags">
-                      {e.tags.map((t) => (
-                        <button
-                          key={t}
-                          className="chip"
-                          aria-label={`移除标签 ${t}`}
-                          style={{ ["--chip-c" as string]: tagColor(t) }}
-                          title={t}
-                          onClick={(ev) => {
-                            ev.stopPropagation();
-                            removeTagFrom(e, t);
-                          }}
-                        >
-                          <span className="chip-text">#{t}</span>
-                          <IconClose size={11} className="chip-x" />
-                        </button>
-                      ))}
-                    </span>
-                    <span className="col date muted">{formatDate(e.modified)}</span>
-                    <span className="col size muted">{e.is_dir ? "" : formatSize(e.size)}</span>
-                  </div>
+                    entry={e}
+                    idx={idx}
+                    isCursor={idx === cursor}
+                    isSelected={selected.has(e.path)}
+                    isRenaming={idx === renamingIdx}
+                    isDissolving={dissolving.has(e.path)}
+                    renameRef={renameRef}
+                    actions={rowActionsRef}
+                  />
                 ))}
               </div>
             )}
@@ -2385,6 +2358,119 @@ function FileGlyph({ entry }: { entry: FileEntry }) {
     </span>
   );
 }
+
+/**
+ * 行事件处理器集合。
+ * 父组件每帧把最新闭包写进一个 ref，行组件在事件触发时才从 ref 读取，
+ * 这样即便该行因 memo 被跳过渲染，也不会执行到过期闭包。
+ */
+type RowActions = {
+  attachRef: (el: HTMLDivElement | null, idx: number) => void;
+  dragStart: (ev: ReactDragEvent<HTMLDivElement>, entry: FileEntry) => void;
+  click: (ev: ReactMouseEvent<HTMLDivElement>, entry: FileEntry, idx: number) => void;
+  dblclick: (entry: FileEntry) => void;
+  keydown: (ev: ReactKeyboardEvent<HTMLDivElement>) => void;
+  contextMenu: (ev: ReactMouseEvent<HTMLDivElement>, entry: FileEntry) => void;
+  renameCommit: () => void;
+  renameCancel: () => void;
+  removeTag: (entry: FileEntry, tag: string) => void;
+};
+
+type RowProps = {
+  entry: FileEntry;
+  idx: number;
+  isCursor: boolean;
+  isSelected: boolean;
+  isRenaming: boolean;
+  isDissolving: boolean;
+  renameRef: { current: HTMLInputElement | null };
+  actions: { current: RowActions };
+};
+
+/**
+ * 单行（memo 化）。
+ * props 只有数据布尔量、下标与两个稳定引用，因此与行无关的 state（通知、标签输入、
+ * 弹层开关、搜索框文字等）变化不会再让整表重渲染；只有 isCursor/isSelected 等真正
+ * 变化的那一两行才重新渲染。
+ */
+const Row = memo(function Row({
+  entry: e,
+  idx,
+  isCursor,
+  isSelected,
+  isRenaming,
+  isDissolving,
+  renameRef,
+  actions,
+}: RowProps) {
+  return (
+    <div
+      ref={(el) => actions.current.attachRef(el, idx)}
+      tabIndex={isCursor ? 0 : -1}
+      role="option"
+      aria-selected={isSelected}
+      className={`row ${isCursor ? "focused" : ""} ${isSelected ? "selected" : ""} ${isDissolving ? "row-dissolving" : ""}`}
+      draggable={!isRenaming}
+      onDragStart={(ev) => actions.current.dragStart(ev, e)}
+      onClick={(ev) => actions.current.click(ev, e, idx)}
+      onDoubleClick={() => actions.current.dblclick(e)}
+      onKeyDown={(ev) => actions.current.keydown(ev)}
+      onContextMenu={(ev) => actions.current.contextMenu(ev, e)}
+    >
+      <span className="col name">
+        <FileGlyph entry={e} />
+        {isRenaming ? (
+          <input
+            ref={renameRef}
+            className="rename-input"
+            autoComplete="off"
+            // 非受控：输入过程只改 DOM，不触发整表重渲染；提交时从 ref 取值
+            defaultValue={e.name}
+            onMouseDown={(ev2) => ev2.stopPropagation()}
+            onDoubleClick={(ev2) => ev2.stopPropagation()}
+            onClick={(ev2) => ev2.stopPropagation()}
+            onKeyDown={(ev2) => {
+              ev2.stopPropagation();
+              if (ev2.key === "Enter") {
+                ev2.preventDefault();
+                actions.current.renameCommit();
+              } else if (ev2.key === "Escape") {
+                ev2.preventDefault();
+                actions.current.renameCancel();
+              }
+            }}
+            onBlur={() => actions.current.renameCommit()}
+            spellCheck={false}
+          />
+        ) : (
+          <span className="filename">
+            {e.tags.length > 0 ? e.base + (e.ext ? "." + e.ext : "") : e.name}
+          </span>
+        )}
+      </span>
+      <span className="col tags">
+        {e.tags.map((t) => (
+          <button
+            key={t}
+            className="chip"
+            aria-label={`移除标签 ${t}`}
+            style={{ ["--chip-c" as string]: tagColor(t) }}
+            title={t}
+            onClick={(ev) => {
+              ev.stopPropagation();
+              actions.current.removeTag(e, t);
+            }}
+          >
+            <span className="chip-text">#{t}</span>
+            <IconClose size={11} className="chip-x" />
+          </button>
+        ))}
+      </span>
+      <span className="col date muted">{formatDate(e.modified)}</span>
+      <span className="col size muted">{e.is_dir ? "" : formatSize(e.size)}</span>
+    </div>
+  );
+});
 
 /** 轮询超时哨兵：网络路径读取在时限内未返回时由 withTimeout 返回 */
 const TIMEOUT = Symbol("poll-timeout");
