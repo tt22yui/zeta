@@ -15,11 +15,13 @@
 
 - **发布包仅包含 macOS dmg 和 Windows zip 绿色包，禁止生成 NSIS 安装包**。
 
+- Windows 不生成任何安装包（含 NSIS/MSI），由 `src-tauri/tauri.windows.conf.json` 的 `bundle.active = false` 保证；macOS 仅 dmg，由 `src-tauri/tauri.macos.conf.json` 的 `bundle.targets = ["dmg"]` 保证；`tauri.conf.json` 的 targets 为显式 `["app", "dmg"]`。
+
 - Windows zip 文件名必须为英文，格式：`Zeta-win64-v<版本号>.zip`。
 
 - macOS dmg 文件名为 `Zeta_x.x.x_*.dmg`。
 
-- 版本号遵循语义化版本；**每次发布包变更需更新版本号**（package.json、src-tauri/Cargo.toml、tauri.conf.json 等处保持一致）。
+- 版本号遵循语义化版本；**每次发布包变更需更新版本号**（package.json、src-tauri/Cargo.toml、tauri.conf.json 等处保持一致），并同步 `CHANGELOG.md`（该文件会被 `release.yml` 用作 Release 正文）。
 
 - Tauri 构建 `--bundles` 参数不支持 `zip`：Windows 发布用 `--no-bundle` 生成 exe 后**手动压缩为 zip**。
 
@@ -49,7 +51,7 @@
 
 - **避免重复加载**：应用内操作（打标签/删除/重命名）后显式 reload 了就不应再由本次触发的事件重复 reload（用 `selfOpAt` 短窗口标记跳过自身 watch）。
 
-- 验证：改动后用 `npm run tsc -- --noEmit`（前端）、`cargo check` / `cargo test`（后端）确认通过。
+- 验证：改动后用 `npx tsc --noEmit`（前端；package.json 未定义 `tsc` 脚本，`npm run tsc` 会报 Missing script）、`cargo check` / `cargo test`（后端）确认通过。
 
 ## 界面与体验约定
 
@@ -59,7 +61,7 @@
 
 - **键盘优先、可被发现**：常用操作都要能纯键盘完成；右键菜单标 `role="menu"/"menuitem"` 并支持 ↑↓/Home/End/Enter/Esc 导航。快捷键要内联显示在对应菜单项右侧（如 `Ctrl+Shift+Z`），不在文档/工具提示里藏。全局快捷键不与输入框冲突。
 
-- **单一强调色、克制用色**：一个主强调色 + 语义色（成功/警告/危险）即可，不堆彩色；深浅色模式全部走设计令牌（`styles.css` 的 `--tc-*` 变量），不写死颜色。
+- **单一强调色、克制用色**：一个主强调色 + 语义色（成功/警告/危险）即可，不堆彩色；深浅色模式全部走设计令牌（`styles.css` 的 `--bg` / `--surface` / `--text` / `--accent` / `--danger` 等，深色由 `html[data-theme="dark"]` 覆盖；`--tc-*` 仅为标签/类型色板），不写死颜色。
 
 - **信息层级克制**：每屏保留一个主操作，减少边框/分割线等视觉噪音；状态栏、文件名做单行截断，窄窗自适应。
 

@@ -71,6 +71,8 @@ git tag v0.1.5
 git push origin --tags
 ```
 
+> macOS builds ship an Apple Silicon (aarch64) dmg only — no Intel x64 package.
+
 > Code signing and notarization are not configured yet: Windows artifacts may trigger a SmartScreen warning, and macOS artifacts are ad-hoc signed — they run on your own machine.
 
 ## Tauri Commands Overview

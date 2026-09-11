@@ -71,6 +71,8 @@ git tag v0.1.5
 git push origin --tags
 ```
 
+> macOS 仅产出 Apple Silicon（aarch64）dmg，未提供 Intel x64 包。
+
 > 当前未配置代码签名与公证：Windows 产物会有 SmartScreen 提示，macOS 产物为 ad-hoc 签名，本机可运行。
 
 ## 命令一览（Tauri）
