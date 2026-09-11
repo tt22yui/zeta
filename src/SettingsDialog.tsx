@@ -30,12 +30,34 @@ export function SettingsDialog(props: SettingsDialogProps) {
               <h3 className="set-group-title">外观</h3>
               <div className="set-row">
                 <span className="set-label">主题</span>
-                <div className="theme-seg" role="radiogroup" aria-label="主题">
+                <div
+                  className="theme-seg"
+                  role="radiogroup"
+                  aria-label="主题"
+                  onKeyDown={(ev) => {
+                    // 单选组约定：方向键切换并同步聚焦，Home/End 跳首尾
+                    const i = THEME_OPTIONS.findIndex((o) => o.value === settings.theme);
+                    const cur = i < 0 ? 0 : i;
+                    const last = THEME_OPTIONS.length - 1;
+                    let next = -1;
+                    if (ev.key === "ArrowRight" || ev.key === "ArrowDown") next = (cur + 1) % THEME_OPTIONS.length;
+                    else if (ev.key === "ArrowLeft" || ev.key === "ArrowUp") next = (cur - 1 + THEME_OPTIONS.length) % THEME_OPTIONS.length;
+                    else if (ev.key === "Home") next = 0;
+                    else if (ev.key === "End") next = last;
+                    if (next < 0) return;
+                    ev.preventDefault();
+                    onChange({ theme: THEME_OPTIONS[next].value });
+                    ev.currentTarget
+                      .querySelectorAll<HTMLButtonElement>('[role="radio"]')
+                      [next]?.focus();
+                  }}
+                >
                   {THEME_OPTIONS.map((opt) => (
                     <button
                       key={opt.value}
                       role="radio"
                       aria-checked={settings.theme === opt.value}
+                      tabIndex={settings.theme === opt.value ? 0 : -1}
                       className={
                         "theme-seg-item" +
                         (settings.theme === opt.value ? " selected" : "")

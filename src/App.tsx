@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -80,8 +81,15 @@ function hashStr(s: string): number {
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
   return Math.abs(h);
 }
+const TAG_COLOR_CACHE = new Map<string, string>();
 export function tagColor(tag: string): string {
-  return TAG_COLORS[hashStr(tag) % TAG_COLORS.length];
+  // 结果缓存：列表每行每个 chip 每次渲染都会调用，避免重复哈希（标签名种类有限）
+  const hit = TAG_COLOR_CACHE.get(tag);
+  if (hit) return hit;
+  const color = TAG_COLORS[hashStr(tag) % TAG_COLORS.length];
+  if (TAG_COLOR_CACHE.size >= 512) TAG_COLOR_CACHE.clear(); // 防御无界增长
+  TAG_COLOR_CACHE.set(tag, color);
+  return color;
 }
 
 /**
@@ -156,9 +164,19 @@ const EXT_STYLE: Record<string, { label: string; color: string }> = {
   ts: { label: "TS", color: "var(--tc-2)" },
   json: { label: "{} ", color: "var(--tc-4)" },
 };
+/** 未知扩展名的图标样式缓存：渲染期不再为每个未知扩展名新建对象 */
+const EXT_STYLE_FALLBACK = new Map<string, { label: string; color: string }>();
 function extStyle(ext: string) {
-  const s = EXT_STYLE[ext.toLowerCase()];
-  return s ?? { label: (ext.slice(0, 3).toUpperCase() || "FILE"), color: "var(--text-3)" };
+  const key = ext.toLowerCase();
+  const known = EXT_STYLE[key];
+  if (known) return known;
+  let fb = EXT_STYLE_FALLBACK.get(key);
+  if (!fb) {
+    fb = { label: ext.slice(0, 3).toUpperCase() || "FILE", color: "var(--text-3)" };
+    if (EXT_STYLE_FALLBACK.size >= 512) EXT_STYLE_FALLBACK.clear();
+    EXT_STYLE_FALLBACK.set(key, fb);
+  }
+  return fb;
 }
 
 function formatSize(n: number): string {
@@ -193,7 +211,10 @@ export default function App() {
   // 地址栏历史：已成功进入过的目录（去重、最近优先、持久化）
   const [addrHist, setAddrHist] = useState<string[]>(() => {
     try {
-      return JSON.parse(localStorage.getItem("zeta.addrHist") ?? "[]");
+      const raw = JSON.parse(localStorage.getItem("zeta.addrHist") ?? "[]");
+      // localStorage 可能被外部写坏（非数组或混入非字符串），这里兜底过滤，
+      // 否则后续 addrHist.map 会直接抛错崩掉整个界面（对比 favorites 的处理）
+      return Array.isArray(raw) ? raw.filter((p): p is string => typeof p === "string") : [];
     } catch {
       return [];
     }
@@ -245,6 +266,13 @@ export default function App() {
       }, dur);
     }
   }, []);
+  /** 复制到剪贴板并反馈失败：调用点分散在快捷键与右键菜单，统一封装避免静默失败 */
+  const copyWithNotice = useCallback(
+    (text: string, what: string) => {
+      void copyText(text).catch((e) => showNotice("error", `复制${what}失败：${e}`));
+    },
+    [showNotice]
+  );
   // 集中式弹窗编排：null=不弹；kind="confirm" 确认框 / "prompt" 输入框（替代原生 confirm/prompt）
   const [dialog, setDialog] = useState<
     | { kind: "confirm"; title: string; message: string; danger?: boolean; confirmLabel?: string; action: () => void }
@@ -258,6 +286,9 @@ export default function App() {
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
   const [search, setSearch] = useState("");
+  // 搜索输入即时回显，但对大目录的过滤+排序（visibleEntries）走延迟值，
+  // 避免每敲一个字符都同步阻塞在主线程上重排全表。
+  const deferredSearch = useDeferredValue(search);
   const [tagInput, setTagInput] = useState("");
   const [isMax, setIsMax] = useState(false);
   // 排序：key 为字段（name/size/modified），desc 为升序/降序
@@ -293,9 +324,8 @@ export default function App() {
   // 类型定位（打字跳转）缓冲
   const typeBuf = useRef("");
   const typeTimer = useRef<number>();
-  // 行内重命名
+  // 行内重命名（输入值由输入框自身持有，不再放 state）
   const [renamingIdx, setRenamingIdx] = useState<number | null>(null);
-  const [renameVal, setRenameVal] = useState("");
   const renameRef = useRef<HTMLInputElement | null>(null);
   // 运行时版本号（标题栏用）
   const [appVersion, setAppVersion] = useState("");
@@ -315,8 +345,29 @@ export default function App() {
   const selfOpAt = useRef(0);
   // 解散文件夹动画：正在收缩淡出的行路径集合（动画结束才真正执行解散）
   const [dissolving, setDissolving] = useState<Set<string>>(new Set());
+  // 弹层 / 对话框 / 地址栏编辑中：此时全局导航键（裸 ←→）不应改动背后的列表。
+  // 用 ref 同步而非放进依赖，避免这些开关一变动就重挂 window 监听。
+  const popupOpenRef = useRef(false);
+  popupOpenRef.current = !!(
+    histOpen ||
+    crumbMenu ||
+    driveOpen ||
+    favOpen ||
+    ctxMenu ||
+    dialog ||
+    settingsOpen ||
+    addrEdit
+  );
 
-  useEffect(() => () => window.clearTimeout(typeTimer.current), []);
+  // 卸载时清掉所有延时器：否则卸载后回调仍会触发 setState（并可能改动已卸载组件的状态）
+  useEffect(
+    () => () => {
+      window.clearTimeout(typeTimer.current);
+      window.clearTimeout(noticeTimer.current);
+      window.clearTimeout(crumbCloseTimer.current);
+    },
+    []
+  );
 
   // 窗口以 visible:false 启动，React 首帧提交后立即显示，避免白屏/跳动。
   // 注意不能用 requestAnimationFrame：隐藏窗口时 rAF 被暂停，show 不会触发
@@ -694,9 +745,12 @@ const stepForward = useCallback(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setCrumbMenu(null);
     };
-    window.setTimeout(() => window.addEventListener("mousedown", onDoc, true), 0);
+    // 延迟到本次按钮事件之后再注册，避免「打开即关闭」；若期间面板已被关闭，
+    // cleanup 必须连这个待执行的回调一起取消，否则监听器会在 cleanup 之后被永久挂上（泄漏并持有过期闭包）
+    const deferAdd = window.setTimeout(() => window.addEventListener("mousedown", onDoc, true), 0);
     window.addEventListener("keydown", onKey);
     return () => {
+      window.clearTimeout(deferAdd);
       window.removeEventListener("mousedown", onDoc, true);
       window.removeEventListener("keydown", onKey);
     };
@@ -711,9 +765,10 @@ const stepForward = useCallback(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setDriveOpen(false);
     };
-    window.setTimeout(() => window.addEventListener("mousedown", onDoc, true), 0);
+    const deferAdd = window.setTimeout(() => window.addEventListener("mousedown", onDoc, true), 0);
     window.addEventListener("keydown", onKey);
     return () => {
+      window.clearTimeout(deferAdd);
       window.removeEventListener("mousedown", onDoc, true);
       window.removeEventListener("keydown", onKey);
     };
@@ -728,9 +783,10 @@ const stepForward = useCallback(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setFavOpen(false);
     };
-    window.setTimeout(() => window.addEventListener("mousedown", onDoc, true), 0);
+    const deferAdd = window.setTimeout(() => window.addEventListener("mousedown", onDoc, true), 0);
     window.addEventListener("keydown", onKey);
     return () => {
+      window.clearTimeout(deferAdd);
       window.removeEventListener("mousedown", onDoc, true);
       window.removeEventListener("keydown", onKey);
     };
@@ -744,7 +800,7 @@ const stepForward = useCallback(() => {
 
   const visibleEntries = useMemo(() => {
     let list = entries;
-    const q = search.trim().toLowerCase();
+    const q = deferredSearch.trim().toLowerCase();
     if (q) list = list.filter((e) => e.name.toLowerCase().includes(q));
 
     const sorted = [...list].sort((a, b) => {
@@ -761,7 +817,7 @@ const stepForward = useCallback(() => {
       return sortDesc ? -r : r;
     });
     return sorted;
-  }, [entries, search, sortKey, sortDesc]);
+  }, [entries, deferredSearch, sortKey, sortDesc]);
 
   // 空格预览面板当前条目：从 visibleEntries 按 previewPath 派生，
   // 列表刷新后自动同步到新 entry 对象（路径不变）
@@ -770,7 +826,11 @@ const stepForward = useCallback(() => {
     [previewPath, visibleEntries]
   );
 
-  const folders = entries.filter((e) => e.is_dir).length;
+  const folders = useMemo(() => {
+    let n = 0;
+    for (const e of entries) if (e.is_dir) n++;
+    return n;
+  }, [entries]);
   const files = entries.length - folders;
 
   // 当前所在的盘符（UNC 路径时无盘符）
@@ -978,9 +1038,13 @@ const stepForward = useCallback(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setHistOpen(false);
     };
-    window.setTimeout(() => window.addEventListener("mousedown", onDoc, true), 0); // 延迟到本次按钮事件之后，避免打开即关闭
+    const deferAdd = window.setTimeout(
+      () => window.addEventListener("mousedown", onDoc, true),
+      0
+    ); // 延迟到本次按钮事件之后，避免打开即关闭
     window.addEventListener("keydown", onKey);
     return () => {
+      window.clearTimeout(deferAdd);
       window.removeEventListener("mousedown", onDoc, true);
       window.removeEventListener("keydown", onKey);
     };
@@ -993,10 +1057,11 @@ const stepForward = useCallback(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") close();
     };
-    window.setTimeout(() => window.addEventListener("click", close), 0); // 延迟避免同次右键立即关闭
+    const deferAdd = window.setTimeout(() => window.addEventListener("click", close), 0); // 延迟避免同次右键立即关闭
     window.addEventListener("keydown", onKey);
     window.addEventListener("scroll", close, true);
     return () => {
+      window.clearTimeout(deferAdd);
       window.removeEventListener("click", close);
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("scroll", close, true);
@@ -1188,10 +1253,14 @@ const stepForward = useCallback(() => {
     [visibleEntries, focusRow]
   );
 
-  // PageUp/PageDown 翻页步长：按可见区域能容纳的行数
+  // PageUp/PageDown 翻页步长：按可见区域能容纳的行数。
+  // 行高取首行实测值（而非硬编码常量），避免与 CSS 里的 .row 高度脱钩。
   const pageStep = useCallback(() => {
     const body = bodyRef.current;
-    return body ? Math.max(1, Math.floor(body.clientHeight / 32) - 1) : 8;
+    if (!body) return 8;
+    const rowH = body.firstElementChild?.getBoundingClientRect().height;
+    const h = rowH && rowH > 0 ? rowH : 40; // 兜底值与 styles.css 的 .row min-height 一致
+    return Math.max(1, Math.floor(body.clientHeight / h) - 1);
   }, []);
 
   // 行内重命名：提交（Enter / 失焦）
@@ -1201,7 +1270,8 @@ const stepForward = useCallback(() => {
     selfOpAt.current = Date.now();
     const idx = renamingIdx;
     const entry = idx == null ? null : visibleEntries[idx];
-    const v = renameVal.trim();
+    // 值从输入框 DOM 读取（该输入框是非受控的）：避免每个按键都 setState 让整表重渲染
+    const v = (renameRef.current?.value ?? "").trim();
     setRenamingIdx(null);
     if (!entry || !v || v === entry.name) return;
     const newPath =
@@ -1212,13 +1282,12 @@ const stepForward = useCallback(() => {
     } catch (e) {
       showNotice("error", String(e));
     }
-  }, [renamingIdx, renameVal, visibleEntries, reload, showNotice]);
+  }, [renamingIdx, visibleEntries, reload, showNotice]);
 
-  // 开始对光标行重命名（F2）
+  // 开始对光标行重命名（F2）；输入框自身以 defaultValue 承载初值，无需再写状态
   const startRename = useCallback(() => {
     if (cursor < 0) return;
     renameCommitted.current = false;
-    setRenameVal(visibleEntries[cursor].name);
     setRenamingIdx(cursor);
   }, [cursor, visibleEntries]);
 
@@ -1314,8 +1383,11 @@ const stepForward = useCallback(() => {
   // 注意：删除与撤销/重做暂无快捷键（后端命令已就绪，界面未接入，见 PLAN.md）
   const handleAppKeyDown = useCallback(
     (ev: ReactKeyboardEvent) => {
-      const t = ev.target as HTMLElement;
-      if (t.closest("input")) return;
+      const t = ev.target as HTMLElement | null;
+      // 输入框内一律让位给文本编辑
+      if (t && isEditableTarget(t)) return;
+      // 焦点在按钮/链接/菜单项上时，空格要留给它们自身的激活语义
+      const onControl = !!t && isInteractiveTarget(t);
       const ctrl = ev.ctrlKey || ev.metaKey;
       if (ctrl && (ev.key === "a" || ev.key === "A")) {
         ev.preventDefault();
@@ -1326,18 +1398,19 @@ const stepForward = useCallback(() => {
       if (ctrl && ev.shiftKey && (ev.key === "C" || ev.key === "c")) {
         ev.preventDefault();
         const target = visibleEntries.find((e) => selected.has(e.path));
-        if (target) void copyText(target.path);
+        if (target) copyWithNotice(target.path, "路径");
         return;
       }
       // 复制文件名：Ctrl+C（仅文本，非文件级剪贴板）
       if (ctrl && !ev.shiftKey && (ev.key === "C" || ev.key === "c")) {
         ev.preventDefault();
         const target = visibleEntries.find((e) => selected.has(e.path));
-        if (target) void copyText(target.name);
+        if (target) copyWithNotice(target.name, "文件名");
         return;
       }
       // 空格预览：打开时再按关闭；未打开时预览当前选中文件（目录不预览）
-      if (ev.key === " " || ev.code === "Space") {
+      // 焦点在按钮等控件上时不拦截，否则按钮按空格既激活不了、还会顺手弹预览
+      if ((ev.key === " " || ev.code === "Space") && !onControl) {
         ev.preventDefault();
         if (previewPath) {
           setPreviewPath(null);
@@ -1358,16 +1431,7 @@ const stepForward = useCallback(() => {
         anchor.current = -1;
         return;
       }
-      if (ev.key === "F2") {
-        ev.preventDefault();
-        startRename();
-        return;
-      }
-      if (ev.key === "F5") {
-        ev.preventDefault();
-        reload();
-        return;
-      }
+      // F2 / F5 由下方 window 捕获层统一处理（会 stopImmediatePropagation），此处不再重复
       // 打字定位：在列表上输入字符，按名称前缀（不区分大小写）跳转
       if (!ctrl && !ev.altKey && ev.key.length === 1) {
         window.clearTimeout(typeTimer.current);
@@ -1415,7 +1479,7 @@ const stepForward = useCallback(() => {
     const onKey = (ev: KeyboardEvent) => {
       const { altKey, key } = ev;
       const t = ev.target as HTMLElement | null;
-      const inInput = !!(t && t.closest("input, textarea, [contenteditable='true']"));
+      const inInput = !!(t && isEditableTarget(t));
       if (key === "F2") {
         // 输入框内（改名片/地址栏/标签输入）不拦截，避免误触发重命名
         if (inInput) return;
@@ -1433,6 +1497,8 @@ const stepForward = useCallback(() => {
       if (key !== "ArrowLeft" && key !== "ArrowRight") return;
       if (inInput) return;
       if (altKey) return;
+      // 弹层/对话框打开时裸 ←→ 属于该弹层的交互，不能顺手改动背后的列表
+      if (popupOpenRef.current) return;
       if (key === "ArrowLeft") {
         ev.preventDefault();
         void goUp();
@@ -1540,7 +1606,7 @@ const stepForward = useCallback(() => {
             <IconRedo size={16} />
           </button>
           <div className="vsep" />
-          <div className="fav-select" ref={favWrapRef}>
+          <div className="fav-select" ref={favWrapRef} onKeyDown={(ev) => menuKeyNav(ev, () => setFavOpen(false))}>
             <button
               className={`icon-btn fav-trigger ${favOpen ? "active" : ""}`}
               onClick={(ev) => {
@@ -1595,7 +1661,7 @@ const stepForward = useCallback(() => {
               </div>
             )}
           </div>
-          <div className="drive-select" ref={driveWrapRef}>
+          <div className="drive-select" ref={driveWrapRef} onKeyDown={(ev) => menuKeyNav(ev, () => setDriveOpen(false))}>
             <button
               className="drive-trigger"
               onClick={(ev) => {
@@ -1746,6 +1812,7 @@ const stepForward = useCallback(() => {
                 }}
                 title="浏览访问历史"
                 aria-label="浏览访问历史"
+                aria-haspopup="menu"
                 aria-expanded={histOpen}
               >
                 <IconSortArrow dir="desc" size={12} className="caret" />
@@ -1815,8 +1882,11 @@ const stepForward = useCallback(() => {
                 <div
                   className="crumb-menu"
                   style={{ left: crumbMenu.left, top: crumbMenu.top }}
+                  role="menu"
+                  aria-label="子文件夹"
                   onMouseEnter={keepCrumbMenu}
                   onMouseLeave={closeCrumbMenuSoon}
+                  onKeyDown={(ev) => menuKeyNav(ev, () => setCrumbMenu(null))}
                   onClick={(ev) => ev.stopPropagation()}
                 >
                   <div className="crumb-menu-title">{crumbMenu.path}</div>
@@ -1827,6 +1897,7 @@ const stepForward = useCallback(() => {
                       <button
                         key={sub}
                         className="crumb-menu-item"
+                        role="menuitem"
                         onClick={() => {
                           setCrumbMenu(null);
                           if (sub !== path) void navigate(sub);
@@ -1932,6 +2003,9 @@ const stepForward = useCallback(() => {
                 key={path}
                 className="table-body dir-enter"
                 ref={bodyRef}
+                role="listbox"
+                aria-multiselectable="true"
+                aria-label="文件列表"
                 onContextMenu={(ev) => {
                   ev.preventDefault();
                   ev.stopPropagation();
@@ -1953,6 +2027,7 @@ const stepForward = useCallback(() => {
                       rowRefs.current[idx] = el;
                     }}
                     tabIndex={idx === cursor ? 0 : -1}
+                    role="option"
                     aria-selected={selected.has(e.path)}
                     className={`row ${idx === cursor ? "focused" : ""} ${selected.has(e.path) ? "selected" : ""} ${dissolving.has(e.path) ? "row-dissolving" : ""}`}
                     draggable={renamingIdx !== idx}
@@ -2001,8 +2076,8 @@ const stepForward = useCallback(() => {
                           ref={renameRef}
                           className="rename-input"
                           autoComplete="off"
-                          value={renameVal}
-                          onChange={(ev2) => setRenameVal(ev2.target.value)}
+                          // 非受控：输入过程只改 DOM，不触发整表重渲染；提交时从 ref 取值
+                          defaultValue={e.name}
                           onMouseDown={(ev2) => ev2.stopPropagation()}
                           onDoubleClick={(ev2) => ev2.stopPropagation()}
                           onClick={(ev2) => ev2.stopPropagation()}
@@ -2155,7 +2230,6 @@ const stepForward = useCallback(() => {
             if (i >= 0) {
               setCursor(i);
               renameCommitted.current = false;
-              setRenameVal(single.name);
               setRenamingIdx(i);
             }
           }}
@@ -2235,13 +2309,13 @@ const stepForward = useCallback(() => {
             const single = ctxMenu.single;
             if (!single) return;
             closeCtxMenu();
-            void copyText(single.name);
+            copyWithNotice(single.name, "文件名");
           }}
           onCopyPath={() => {
             const single = ctxMenu.single;
             if (!single) return;
             closeCtxMenu();
-            void copyText(single.path);
+            copyWithNotice(single.path, "路径");
           }}
         />
       )}
@@ -2294,7 +2368,7 @@ const stepForward = useCallback(() => {
 function FileGlyph({ entry }: { entry: FileEntry }) {
   if (entry.is_dir) {
     return (
-      <span className="glyph dir" title="文件夹">
+      <span className="glyph dir" title="文件夹" aria-hidden="true">
         <IconFolder size={19} />
       </span>
     );
@@ -2305,6 +2379,7 @@ function FileGlyph({ entry }: { entry: FileEntry }) {
       className="glyph file"
       style={{ ["--glyph-c" as string]: s.color }}
       title={entry.ext ? `${entry.ext} 文件` : "文件"}
+      aria-hidden="true"
     >
       <span className="glyph-label">{s.label}</span>
     </span>
@@ -2314,8 +2389,8 @@ function FileGlyph({ entry }: { entry: FileEntry }) {
 /** 轮询超时哨兵：网络路径读取在时限内未返回时由 withTimeout 返回 */
 const TIMEOUT = Symbol("poll-timeout");
 
-/** 竞速包装：ms 内未 settle（或失败）返回 TIMEOUT，避免网络路径挂起阻塞轮询 */
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | typeof TIMEOUT> {
+/** 竞速包装：ms 内未返回视为「超时」（TIMEOUT）；调用方自身失败返回 null，二者语义必须区分 */
+function withTimeout<T>(p: Promise<T | null>, ms: number): Promise<T | null | typeof TIMEOUT> {
   return new Promise((resolve) => {
     const t = window.setTimeout(() => resolve(TIMEOUT), ms);
     p.then(
@@ -2324,11 +2399,64 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | typeof TIMEOUT> 
         resolve(v);
       },
       () => {
+        // 失败（而非超时）交回 null，避免把「路径不可达/无权限」误报成「网络响应超时」
         window.clearTimeout(t);
-        resolve(TIMEOUT);
+        resolve(null);
       }
     );
   });
+}
+
+/** 焦点是否在可编辑控件上：全局快捷键必须让位给输入框/文本域 */
+function isEditableTarget(t: HTMLElement): boolean {
+  return !!t.closest("input, textarea, select, [contenteditable='true']");
+}
+
+/** 焦点是否在自带按键语义的控件上：空格/回车要交给它们，不能被全局快捷键抢走 */
+function isInteractiveTarget(t: HTMLElement): boolean {
+  return !!t.closest("button, a, [role='button'], [role='menuitem']");
+}
+
+/**
+ * 下拉菜单键盘导航：在容器内已渲染的 menuitem 之间移动焦点。
+ * 原生 <button> 的 Enter/空格由浏览器自行触发 click，这里只补非按钮元素的激活。
+ */
+function menuKeyNav(ev: ReactKeyboardEvent<HTMLElement>, dismiss: () => void) {
+  const items = Array.from(ev.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]'));
+  if (items.length === 0) return;
+  const idx = items.findIndex((el) => el === document.activeElement);
+  const focusAt = (i: number) => items[(i + items.length) % items.length].focus();
+  switch (ev.key) {
+    case "ArrowDown":
+      ev.preventDefault();
+      focusAt(idx < 0 ? 0 : idx + 1);
+      break;
+    case "ArrowUp":
+      ev.preventDefault();
+      focusAt(idx < 0 ? items.length - 1 : idx - 1);
+      break;
+    case "Home":
+      ev.preventDefault();
+      focusAt(0);
+      break;
+    case "End":
+      ev.preventDefault();
+      focusAt(items.length - 1);
+      break;
+    case "Enter":
+    case " ":
+      if (idx >= 0 && items[idx].tagName !== "BUTTON") {
+        ev.preventDefault();
+        items[idx].click();
+      }
+      break;
+    case "Escape":
+      ev.preventDefault();
+      dismiss();
+      break;
+    default:
+      break;
+  }
 }
 
 function parentOf(path: string): string | null {
@@ -2392,9 +2520,22 @@ function ContextMenu(props: ContextMenuProps) {
         action: onOpenEntry,
       });
     // 复制类操作：仅单选时展示，多选场景路径/文件名含义模糊
+    // 加速键文案跟随平台惯例（macOS 显示 ⌘，与处理器的 metaKey 分支一致）
     if (single) {
-      items.push({ key: "copyname", label: "复制文件名", danger: false, accel: "Ctrl+C", action: onCopyName });
-      items.push({ key: "copypath", label: "复制路径", danger: false, accel: "Ctrl+Shift+C", action: onCopyPath });
+      items.push({
+        key: "copyname",
+        label: "复制文件名",
+        danger: false,
+        accel: isMac ? "⌘C" : "Ctrl+C",
+        action: onCopyName,
+      });
+      items.push({
+        key: "copypath",
+        label: "复制路径",
+        danger: false,
+        accel: isMac ? "⌘⇧C" : "Ctrl+Shift+C",
+        action: onCopyPath,
+      });
     }
     if (single) items.push({ key: "rename", label: "重命名", danger: false, action: onRename });
     // 解散文件夹：单选文件夹，或多选且全部为文件夹时可用
