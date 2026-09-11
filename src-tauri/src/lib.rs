@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -65,21 +66,12 @@ impl History {
         self.undo.lock().unwrap().pop()
     }
 
-    /// 窥视栈顶但不取出：撤销/重做需先执行成功才真正出栈，否则会静默丢历史。
-    fn peek_undo(&self) -> Option<HistoryOp> {
-        self.undo.lock().unwrap().last().cloned()
-    }
-
     fn push_redo(&self, op: HistoryOp) {
         self.redo.lock().unwrap().push(op);
     }
 
     fn pop_redo(&self) -> Option<HistoryOp> {
         self.redo.lock().unwrap().pop()
-    }
-
-    fn peek_redo(&self) -> Option<HistoryOp> {
-        self.redo.lock().unwrap().last().cloned()
     }
 
     fn can_undo(&self) -> bool {
@@ -423,12 +415,20 @@ fn rename_file(from: String, to: String, state: State<History>) -> Result<(), St
     Ok(())
 }
 
+/// 是否为 UNC（网络共享）路径。
+/// `\\server\share` 与 `//server/share` 都算：用户可能从地址栏输入正斜杠形式，
+/// 漏判会让回收站删除在网络路径上失败（甚至静默变成永久删除的预期落空）。
+/// 纯逻辑：可独立单元测试。
+fn is_unc(path: &str) -> bool {
+    path.starts_with("\\\\") || path.starts_with("//")
+}
+
 /// 删除文件/文件夹。
 /// 本地路径移入系统回收站（可恢复，不计入撤销栈）；
 /// UNC 网络共享不支持回收站，改为永久删除（`remove_file` / `remove_dir_all`）。
 #[tauri::command(async)]
 fn delete_file(path: String) -> Result<(), String> {
-    let is_unc = path.starts_with("\\\\");
+    let is_unc = is_unc(&path);
     let p = Path::new(&path);
     if is_unc {
         // 网络路径走永久删除；目录与文件分开处理
@@ -468,6 +468,49 @@ fn set_tag_separator(sep: String, tag_settings: State<TagSettings>) -> Result<()
     Ok(())
 }
 
+/// 反序回滚已完成的移动（best-effort）。
+/// 返回回滚失败的「原路径」列表，供调用方在错误信息里提示用户人工处理。
+fn rollback_moves(done: &[(String, String)]) -> Vec<String> {
+    let mut failed = Vec::new();
+    for (from, to) in done.iter().rev() {
+        if fs::rename(to, from).is_err() {
+            failed.push(from.clone());
+        }
+    }
+    failed
+}
+
+/// 把回滚结果并入错误信息：让用户明确知道「已恢复原状」还是「需要人工收拾」。
+fn rollback_note(failed: &[String]) -> String {
+    if failed.is_empty() {
+        "已回滚，未产生改动".to_string()
+    } else {
+        format!("回滚失败，以下项需人工确认：{}", failed.join("、"))
+    }
+}
+
+/// 按序执行一批移动；任一失败即回滚已完成的移动。
+/// 目的：这些操作不可撤销地改动了用户文件，失败时必须回到操作前的状态，
+/// 而不是留下「移动了一半」的目录（且因未记入历史而无法撤销）。
+fn move_all(moves: &[(String, String)]) -> Result<(), String> {
+    let mut done: Vec<(String, String)> = Vec::with_capacity(moves.len());
+    for (from, to) in moves {
+        if let Err(e) = fs::rename(from, to) {
+            let note = rollback_note(&rollback_moves(&done));
+            return Err(format!("{}；{}", e, note));
+        }
+        done.push((from.clone(), to.clone()));
+    }
+    Ok(())
+}
+
+/// 目标名是否已被占用：既查磁盘，也查本批次已计划的目标名。
+/// 后者不可省：同一批里若「X 冲突改名为 X (2)」而另一个子项本身就叫 X (2)，
+/// 只查磁盘会让两个移动指向同一路径（Unix 上 rename 会静默覆盖）。
+fn target_taken(path: &Path, planned: &HashSet<String>) -> bool {
+    path.exists() || planned.contains(&path.to_string_lossy().to_string())
+}
+
 /// 应用一条撤销操作（纯逻辑，不依赖 Tauri 运行时，便于单测失败路径）。
 /// 调用方须在本函数返回 Ok 后才出栈，否则校验失败会把条目从历史里吞掉。
 fn apply_undo(op: &HistoryOp) -> Result<(), String> {
@@ -484,9 +527,12 @@ fn apply_undo(op: &HistoryOp) -> Result<(), String> {
                 return Err(format!("无法撤销：文件夹仍存在：{}", folder));
             }
             fs::create_dir(folder).map_err(|e| e.to_string())?;
-            for (from, to) in moved {
-                // from = folder/child（原）, to = parent/child（现）
-                fs::rename(to, from).map_err(|e| e.to_string())?;
+            let plan: Vec<(String, String)> =
+                moved.iter().map(|(f, t)| (t.clone(), f.clone())).collect();
+            if let Err(e) = move_all(&plan) {
+                // move_all 已回滚；这里只需清掉刚建的空壳（清不掉也不掩盖原始错误）
+                let _ = fs::remove_dir(folder);
+                return Err(e);
             }
         }
         HistoryOp::CollectFolder { folder, moved } => {
@@ -494,11 +540,13 @@ fn apply_undo(op: &HistoryOp) -> Result<(), String> {
             if !Path::new(folder).exists() {
                 return Err(format!("无法撤销：文件夹不存在：{}", folder));
             }
-            for (from, to) in moved {
-                // from = parent/item（原）, to = folder/item（现）
-                fs::rename(to, from).map_err(|e| e.to_string())?;
+            let plan: Vec<(String, String)> =
+                moved.iter().map(|(f, t)| (t.clone(), f.clone())).collect();
+            move_all(&plan)?;
+            if let Err(e) = fs::remove_dir(folder) {
+                let note = rollback_note(&rollback_moves(&plan));
+                return Err(format!("{}；{}", e, note));
             }
-            fs::remove_dir(folder).map_err(|e| e.to_string())?;
         }
     }
     Ok(())
@@ -518,27 +566,36 @@ fn apply_redo(op: &HistoryOp) -> Result<(), String> {
             if !Path::new(folder).exists() {
                 return Err(format!("无法重做：文件夹不存在：{}", folder));
             }
-            for (from, to) in moved {
-                // from = folder/child（原）, to = parent/child（现）
+            let plan: Vec<(String, String)> =
+                moved.iter().map(|(f, t)| (f.clone(), t.clone())).collect();
+            // 先全量预检目标：避免移动到一半才发现冲突而留下半成品
+            for (_, to) in &plan {
                 if Path::new(to).exists() {
                     return Err(format!("无法重做：目标已存在：{}", to));
                 }
-                fs::rename(from, to).map_err(|e| e.to_string())?;
             }
-            fs::remove_dir(folder).map_err(|e| e.to_string())?;
+            move_all(&plan)?;
+            if let Err(e) = fs::remove_dir(folder) {
+                let note = rollback_note(&rollback_moves(&plan));
+                return Err(format!("{}；{}", e, note));
+            }
         }
         HistoryOp::CollectFolder { folder, moved } => {
             // 重做 = 重建文件夹 + 重新把子项移入
             if Path::new(folder).exists() {
                 return Err(format!("无法重做：文件夹已存在：{}", folder));
             }
-            fs::create_dir(folder).map_err(|e| e.to_string())?;
-            for (from, to) in moved {
-                // from = parent/item（原）, to = folder/item（现）
+            let plan: Vec<(String, String)> =
+                moved.iter().map(|(f, t)| (f.clone(), t.clone())).collect();
+            for (_, to) in &plan {
                 if Path::new(to).exists() {
                     return Err(format!("无法重做：目标已存在：{}", to));
                 }
-                fs::rename(from, to).map_err(|e| e.to_string())?;
+            }
+            fs::create_dir(folder).map_err(|e| e.to_string())?;
+            if let Err(e) = move_all(&plan) {
+                let _ = fs::remove_dir(folder);
+                return Err(e);
             }
         }
     }
@@ -546,29 +603,32 @@ fn apply_redo(op: &HistoryOp) -> Result<(), String> {
 }
 
 /// 撤销上一步操作。
-/// 先窥视再执行，成功后才出栈并压入重做栈：失败时条目留在撤销栈里可重试。
+/// 先出栈再执行：失败时把条目压回撤销栈（保持可重试）。
+/// 不用「peek + apply + pop」是因为它要加两次锁，并发撤销时可能把同一条目应用两次。
 #[tauri::command(async)]
 fn undo(state: State<History>) -> Result<(), String> {
     let op = state
-        .peek_undo()
+        .pop_undo()
         .ok_or_else(|| "没有可撤销的操作".to_string())?;
-    apply_undo(&op)?;
-    if let Some(done) = state.pop_undo() {
-        state.push_redo(done);
+    if let Err(e) = apply_undo(&op) {
+        state.push_undo(op); // 失败不丢历史：放回栈顶
+        return Err(e);
     }
+    state.push_redo(op);
     Ok(())
 }
 
-/// 重做被撤销的操作。同 undo：失败不丢历史条目。
+/// 重做被撤销的操作。同 undo：失败时放回重做栈。
 #[tauri::command(async)]
 fn redo(state: State<History>) -> Result<(), String> {
     let op = state
-        .peek_redo()
+        .pop_redo()
         .ok_or_else(|| "没有可重做的操作".to_string())?;
-    apply_redo(&op)?;
-    if let Some(done) = state.pop_redo() {
-        state.push_undo(done);
+    if let Err(e) = apply_redo(&op) {
+        state.push_redo(op);
+        return Err(e);
     }
+    state.push_undo(op);
     Ok(())
 }
 
@@ -594,14 +654,16 @@ fn dissolve_folder_inner(folder: &Path) -> Result<Vec<(String, String)>, String>
         .parent()
         .ok_or_else(|| "无法解散根目录".to_string())?;
 
-    let mut moved = Vec::new();
+    // 第一步：只读地算出全部移动计划（含同名冲突改名），此时不动任何文件
+    let mut planned: HashSet<String> = HashSet::new();
+    let mut plan: Vec<(String, String)> = Vec::new();
     for entry in fs::read_dir(folder).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let child_path = entry.path();
         let child_name = entry.file_name().to_string_lossy().to_string();
         let mut target = parent.join(&child_name);
         // 同名冲突：按 "名字 (n).ext" 递增（参照资源管理器"保留双方"）
-        if target.exists() {
+        if target_taken(&target, &planned) {
             let stem = Path::new(&child_name)
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
@@ -613,23 +675,30 @@ fn dissolve_folder_inner(folder: &Path) -> Result<Vec<(String, String)>, String>
             let mut n = 2;
             loop {
                 let candidate = parent.join(format!("{} ({}){}", stem, n, ext));
-                if !candidate.exists() {
+                if !target_taken(&candidate, &planned) {
                     target = candidate;
                     break;
                 }
                 n += 1;
             }
         }
-        fs::rename(&child_path, &target).map_err(|e| e.to_string())?;
-        moved.push((
+        planned.insert(target.to_string_lossy().to_string());
+        plan.push((
             child_path.to_string_lossy().to_string(),
             target.to_string_lossy().to_string(),
         ));
     }
 
-    // 删除空壳（仅空目录，不走回收站，以便撤销时直接 create_dir 重建）
-    fs::remove_dir(folder).map_err(|e| e.to_string())?;
-    Ok(moved)
+    // 第二步：执行；任一失败会回滚已完成的移动，不留下"解散了一半"的目录
+    move_all(&plan)?;
+
+    // 删除空壳（仅空目录，不走回收站，以便撤销时直接 create_dir 重建）；
+    // 失败时把子项移回，恢复成操作前的样子
+    if let Err(e) = fs::remove_dir(folder) {
+        let note = rollback_note(&rollback_moves(&plan));
+        return Err(format!("{}；{}", e, note));
+    }
+    Ok(plan)
 }
 
 /// 解散文件夹：子项上移到上级，删除空壳（可撤销）。
@@ -681,10 +750,9 @@ fn collect_into_folder_inner(
         }
     }
     let folder = target.to_string_lossy().to_string();
-    fs::create_dir(&target).map_err(|e| e.to_string())?;
 
-    // 逐项移入；folder 刚创建为空，子项不会同名冲突
-    let mut moved = Vec::with_capacity(items.len());
+    // 先算好全部移动计划（含文件名校验），再动文件系统：避免中途出错留下半成品
+    let mut plan: Vec<(String, String)> = Vec::with_capacity(items.len());
     for s in items {
         let src = Path::new(s);
         let name = src
@@ -692,15 +760,21 @@ fn collect_into_folder_inner(
             .ok_or_else(|| "路径无文件名".to_string())?
             .to_string_lossy()
             .to_string();
-        let dst = target.join(&name);
-        fs::rename(src, &dst).map_err(|e| e.to_string())?;
-        moved.push((
+        plan.push((
             src.to_string_lossy().to_string(),
-            dst.to_string_lossy().to_string(),
+            target.join(&name).to_string_lossy().to_string(),
         ));
     }
 
-    Ok((folder, moved))
+    fs::create_dir(&target).map_err(|e| e.to_string())?;
+
+    // 逐项移入；folder 刚创建为空，子项不会同名冲突。任一失败则回滚 + 清掉空壳
+    if let Err(e) = move_all(&plan) {
+        let _ = fs::remove_dir(&target); // 回滚失败时目录非空会删不掉，忽略即可（不掩盖原始错误）
+        return Err(e);
+    }
+
+    Ok((folder, plan))
 }
 
 /// 收入文件夹：新建文件夹并把选中项移入（可撤销，走 History 栈）。
@@ -1419,34 +1493,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// 命令层流程（pop → apply → 失败 push 回原栈）依赖的栈语义：
+    /// 出栈后再放回，栈顶仍是同一条、顺序不乱。
     #[test]
-    fn history_peek_does_not_consume() {
+    fn pop_then_push_restores_top_of_stack() {
         let h = History::new();
-        assert!(h.peek_undo().is_none());
-        assert_eq!(h.can_undo(), h.peek_undo().is_some());
+        assert!(h.pop_undo().is_none());
 
         h.record(rename_op("a.txt", "b.txt"));
-        // peek 两次都能拿到同一条
-        for _ in 0..2 {
-            let peeked = h.peek_undo().unwrap();
-            let (f, t) = as_rename(&peeked).unwrap();
-            assert_eq!((f, t), ("a.txt", "b.txt"));
-        }
-        // 未消费：仍可撤销，pop 才真正出栈
-        assert!(h.can_undo());
-        let popped = h.pop_undo().unwrap();
-        let (f, t) = as_rename(&popped).unwrap();
-        assert_eq!((f, t), ("a.txt", "b.txt"));
-        assert!(!h.can_undo());
+        h.record(rename_op("b.txt", "c.txt"));
 
-        // redo 栈同理
-        h.push_redo(popped);
-        assert!(h.peek_redo().is_some());
+        let top = h.pop_undo().unwrap();
+        let (f, t) = as_rename(&top).unwrap();
+        assert_eq!((f, t), ("b.txt", "c.txt"));
+
+        // 放回后仍是栈顶（失败不丢历史）
+        h.push_undo(top);
+        let again = h.pop_undo().unwrap();
+        let (f, t) = as_rename(&again).unwrap();
+        assert_eq!((f, t), ("b.txt", "c.txt"));
+
+        // 下一条是更早的操作，顺序未被放回动作打乱
+        let prev = h.pop_undo().unwrap();
+        let (f, t) = as_rename(&prev).unwrap();
+        assert_eq!((f, t), ("a.txt", "b.txt"));
+
+        // redo 栈同构
+        h.push_redo(again);
         assert!(h.can_redo());
-        assert!(h.peek_redo().is_some());
+        let back = h.pop_redo().unwrap();
+        let (f, t) = as_rename(&back).unwrap();
+        assert_eq!((f, t), ("b.txt", "c.txt"));
     }
 
-    /// 命令层流程（peek → apply → 成功才出栈）在 apply 失败时不得丢历史。
+    /// 命令层流程（pop → apply → 失败 push 回原栈）在 apply 失败时不得丢历史，也不得有副作用。
     #[test]
     fn failed_undo_keeps_history_entry() {
         let root = std::env::temp_dir().join("zeta_failed_undo_keeps_history");
@@ -1459,15 +1539,157 @@ mod tests {
 
         let h = History::new();
         h.record(rename_op(&from.to_string_lossy(), &to.to_string_lossy()));
-        // 让撤销注定失败
+        // 让撤销注定失败（源路径被重新占用）
         std::fs::write(&from, "占位").unwrap();
 
-        let op = h.peek_undo().expect("有可撤销项");
-        assert!(apply_undo(&op).is_err());
-        // 关键断言：失败后历史条目仍在，未被吞掉
+        let op = h.pop_undo().expect("有可撤销项");
+        let err = apply_undo(&op).unwrap_err();
+        assert!(err.contains("无法撤销"), "err={err}");
+        h.push_undo(op); // 命令层的做法：失败放回栈顶
+
         assert!(h.can_undo());
-        assert!(h.peek_undo().is_some());
         assert!(!h.can_redo());
+        // 失败路径无副作用
+        assert_eq!(std::fs::read_to_string(&from).unwrap(), "占位");
+        assert!(to.exists());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 回滚原语：按反序把已完成的移动退回原位。
+    #[test]
+    fn rollback_moves_restores_everything() {
+        let root = std::env::temp_dir().join("zeta_rollback_restores");
+        let _ = std::fs::remove_dir_all(&root);
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let a = root.join("a.txt");
+        let b = root.join("b.txt");
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&b, "b").unwrap();
+
+        let a2 = sub.join("a.txt");
+        let b2 = sub.join("b.txt");
+        let done = vec![
+            (a.to_string_lossy().to_string(), a2.to_string_lossy().to_string()),
+            (b.to_string_lossy().to_string(), b2.to_string_lossy().to_string()),
+        ];
+        // 先真的移过去，再回滚
+        for (from, to) in &done {
+            std::fs::rename(from, to).unwrap();
+        }
+        let failed = rollback_moves(&done);
+        assert!(failed.is_empty(), "回滚失败项：{failed:?}");
+        assert!(a.exists() && b.exists());
+        assert!(!a2.exists() && !b2.exists());
+        assert_eq!(rollback_note(&[]), "已回滚，未产生改动");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// move_all：中途失败要回滚已完成的移动，而不是留下半成品。
+    #[test]
+    fn move_all_rolls_back_on_failure() {
+        let root = std::env::temp_dir().join("zeta_move_all_rollback");
+        let _ = std::fs::remove_dir_all(&root);
+        let dest = root.join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let a = root.join("a.txt");
+        std::fs::write(&a, "a").unwrap();
+
+        let plan = vec![
+            (
+                a.to_string_lossy().to_string(),
+                dest.join("a.txt").to_string_lossy().to_string(),
+            ),
+            (
+                // 不存在的源：第二个移动必然失败
+                root.join("missing.txt").to_string_lossy().to_string(),
+                dest.join("missing.txt").to_string_lossy().to_string(),
+            ),
+        ];
+        let err = move_all(&plan).unwrap_err();
+        assert!(err.contains("已回滚"), "err={err}");
+        assert!(a.exists(), "第一个移动应已回滚");
+        assert!(!dest.join("a.txt").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 收入文件夹：中途失败（选中项已被外部删除）要回滚并清掉新建的空壳。
+    #[test]
+    fn collect_into_folder_rolls_back_when_item_missing() {
+        let root = std::env::temp_dir().join("zeta_collect_rollback");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let a = root.join("a.txt");
+        std::fs::write(&a, "a").unwrap();
+        let missing = root.join("missing.txt"); // 同一目录但不存在
+
+        let items = vec![
+            a.to_string_lossy().to_string(),
+            missing.to_string_lossy().to_string(),
+        ];
+        let err = collect_into_folder_inner(&items, "newfolder").unwrap_err();
+        assert!(err.contains("已回滚"), "err={err}");
+        // 已移动的项回到原位，新建的空壳被清掉，失败不产生残留
+        assert!(a.exists());
+        assert!(!root.join("newfolder").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 解散文件夹：删除空壳失败时也要回滚（用软链接让 remove_dir 必然失败）。
+    /// Windows 建软链接需要特权，故仅在 Unix 上跑。
+    #[cfg(unix)]
+    #[test]
+    fn dissolve_folder_rolls_back_when_shell_removal_fails() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join("zeta_dissolve_rollback");
+        let _ = std::fs::remove_dir_all(&root);
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("a.txt"), "a").unwrap();
+
+        // 软链接当"文件夹"：子项能被移出，但 remove_dir(软链接) 必然失败
+        let link = root.join("outer");
+        symlink(&real, &link).unwrap();
+
+        let err = dissolve_folder_inner(&link).unwrap_err();
+        assert!(err.contains("已回滚"), "err={err}");
+        // 子项回到原处，上级目录没有残留
+        assert!(real.join("a.txt").exists());
+        assert!(!root.join("a.txt").exists());
+        // 软链接本身未被删除
+        assert!(link.symlink_metadata().is_ok());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 计划内的目标名也要避让：磁盘上没有、但本批次已计划的目标不能被再次占用。
+    #[test]
+    fn target_taken_considers_planned_names() {
+        let root = std::env::temp_dir().join("zeta_target_taken");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let planned_path = root.join("x (2).txt");
+        let mut planned = HashSet::new();
+        assert!(!target_taken(&planned_path, &planned)); // 磁盘上没有
+        planned.insert(planned_path.to_string_lossy().to_string());
+        assert!(target_taken(&planned_path, &planned)); // 但已被本批次占用
+
+        // 磁盘上存在的也算被占用
+        let on_disk = root.join("y.txt");
+        std::fs::write(&on_disk, "y").unwrap();
+        assert!(target_taken(&on_disk, &HashSet::new()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// UNC 判定要覆盖正反斜杠两种写法，否则网络路径会误走回收站删除。
+    #[test]
+    fn is_unc_accepts_both_separators() {
+        assert!(is_unc("\\\\server\\share"));
+        assert!(is_unc("//server/share"));
+        assert!(is_unc("//server/share/sub/file.txt"));
+        assert!(!is_unc("C:\\Users\\public"));
+        assert!(!is_unc("/Users/public"));
+        assert!(!is_unc("/"));
+        assert!(!is_unc(""));
     }
 }
