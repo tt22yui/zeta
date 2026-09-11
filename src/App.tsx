@@ -253,6 +253,10 @@ export default function App() {
   >(null);
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // selected 的同步镜像：reload 需要「重载前的选中集」才能在重载后恢复选中，
+  // 但若直接依赖 selected，每次点击/框选都会换掉 reload 的身份，进而重建文件监听与 UNC 轮询。
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
   const [search, setSearch] = useState("");
   const [tagInput, setTagInput] = useState("");
   const [isMax, setIsMax] = useState(false);
@@ -881,7 +885,9 @@ const stepForward = useCallback(() => {
   const reload = useCallback(async (opts: { noErrorUi?: boolean } = {}) => {
     // 记住此刻的选中集，重载后用「仍存在」的路径恢复选中，
     // 避免打标签改名后外部 watch 触发的自动刷新把选中清空。
-    const prevSelected = new Set(selected);
+    // 从 ref 读取而非依赖 selected：保持 reload 身份稳定，避免选中变化重建监听
+    // （应尽量避免把高状态放入 reload 的依赖，见下方 watch effect）。
+    const prevSelected = new Set(selectedRef.current);
     // silent：后台刷新不触发 loading 闪烁（轮询/自动刷新/F5 复用）
     const result = await loadDir(path, { silent: true, noErrorUi: opts.noErrorUi });
     const list = result?.list ?? null;
@@ -891,11 +897,13 @@ const stepForward = useCallback(() => {
       if (keep.length) setSelected(new Set(keep));
     }
     return result;
-  }, [path, loadDir, selected]);
+  }, [path, loadDir]);
 
   // 外部对当前目录的变动（增删改）自动刷新。
   // 本地路径用 watchImmediate（事件驱动）；UNC 网络共享不支持文件监听，
   // 降级为 3 秒定时轮询，避免外部改动无法反映到列表。
+  // 依赖里只有 path：reload 已去掉 selected 依赖，选中变化不再重建订阅
+  // （否则每次点击都会 dispose + 重建 watch，UNC 轮询的 inFlight/timeouts 也会被复位）。
   useEffect(() => {
     if (!path) return;
     const isUnc = path.startsWith("\\\\");
@@ -1302,7 +1310,8 @@ const stepForward = useCallback(() => {
     ]
   );
 
-  // 全局快捷键：Ctrl+A 全选、Esc 清除、F2 重命名、F5 刷新、Delete 删除、打字定位（输入框内不响应）
+  // 全局快捷键：Ctrl+A 全选、Esc 清除、F2 重命名、F5 刷新、打字定位（输入框内不响应）
+  // 注意：删除与撤销/重做暂无快捷键（后端命令已就绪，界面未接入，见 PLAN.md）
   const handleAppKeyDown = useCallback(
     (ev: ReactKeyboardEvent) => {
       const t = ev.target as HTMLElement;
@@ -2165,7 +2174,7 @@ const stepForward = useCallback(() => {
             setDialog({
               kind: "confirm",
               title: "解散文件夹",
-              message: `解散${label}？\n其内部子项将分别上移到当前目录，空壳删除。可用 Ctrl+Z 逐个撤销。`,
+              message: `解散${label}？\n其内部子项将分别上移到当前目录，空壳被删除（暂不支持撤销）。`,
               confirmLabel: "解散",
               action: () => {
                 void (async () => {
