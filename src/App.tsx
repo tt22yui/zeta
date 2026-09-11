@@ -64,38 +64,24 @@ import {
   watchSystemTheme,
 } from "./settings";
 import type { Settings } from "./settings";
+import {
+  TIMEOUT,
+  extStyle,
+  formatDate,
+  formatSize,
+  isEditableTarget,
+  isInteractiveTarget,
+  isMac,
+  parentOf,
+  tagColor,
+  withTimeout,
+} from "./util";
 
 const win = getCurrentWindow();
-const isMac = typeof navigator !== "undefined" && /Mac|Macintosh/i.test(navigator.userAgent);
 
 /** 统一轻提示：severity 决定左侧语义色条与是否自动消失（error 常驻手动关闭） */
 type NoticeSeverity = "info" | "success" | "warning" | "error";
 type Notice = { id: number; severity: NoticeSeverity; msg: string } | null;
-
-/** 标签点颜色：按标签名哈希稳定取色 */
-const TAG_COLORS = [
-  "var(--tc-1)",
-  "var(--tc-2)",
-  "var(--tc-3)",
-  "var(--tc-4)",
-  "var(--tc-5)",
-  "var(--tc-6)",
-];
-function hashStr(s: string): number {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
-  return Math.abs(h);
-}
-const TAG_COLOR_CACHE = new Map<string, string>();
-export function tagColor(tag: string): string {
-  // 结果缓存：列表每行每个 chip 每次渲染都会调用，避免重复哈希（标签名种类有限）
-  const hit = TAG_COLOR_CACHE.get(tag);
-  if (hit) return hit;
-  const color = TAG_COLORS[hashStr(tag) % TAG_COLORS.length];
-  if (TAG_COLOR_CACHE.size >= 512) TAG_COLOR_CACHE.clear(); // 防御无界增长
-  TAG_COLOR_CACHE.set(tag, color);
-  return color;
-}
 
 /** 拖拽图标缓存：图形固定，避免每次拖拽都新建 canvas 并做 PNG 编码 */
 let dragIconCache: string | null = null;
@@ -147,69 +133,6 @@ function makeDragIcon(): string {
   return dragIconCache;
 }
 
-
-/** 常见扩展名 -> 类型名 + 主题色，用于统一的文件类型图标 */
-const EXT_STYLE: Record<string, { label: string; color: string }> = {
-  txt: { label: "TXT", color: "var(--tc-2)" },
-  md: { label: "MD", color: "var(--tc-2)" },
-  doc: { label: "DOC", color: "var(--tc-5)" },
-  docx: { label: "DOC", color: "var(--tc-5)" },
-  xls: { label: "XLS", color: "var(--tc-3)" },
-  xlsx: { label: "XLS", color: "var(--tc-3)" },
-  ppt: { label: "PPT", color: "var(--tc-4)" },
-  pptx: { label: "PPT", color: "var(--tc-4)" },
-  pdf: { label: "PDF", color: "var(--tc-6)" },
-  jpg: { label: "IMG", color: "var(--tc-3)" },
-  jpeg: { label: "IMG", color: "var(--tc-3)" },
-  png: { label: "IMG", color: "var(--tc-3)" },
-  gif: { label: "IMG", color: "var(--tc-3)" },
-  svg: { label: "SVG", color: "var(--tc-3)" },
-  mp4: { label: "VID", color: "var(--tc-2)" },
-  mov: { label: "VID", color: "var(--tc-2)" },
-  mp3: { label: "MUS", color: "var(--tc-5)" },
-  wav: { label: "MUS", color: "var(--tc-5)" },
-  zip: { label: "ZIP", color: "var(--tc-4)" },
-  rar: { label: "ZIP", color: "var(--tc-4)" },
-  exe: { label: "EXE", color: "var(--text-3)" },
-  js: { label: "JS", color: "var(--tc-4)" },
-  ts: { label: "TS", color: "var(--tc-2)" },
-  json: { label: "{} ", color: "var(--tc-4)" },
-};
-/** 未知扩展名的图标样式缓存：渲染期不再为每个未知扩展名新建对象 */
-const EXT_STYLE_FALLBACK = new Map<string, { label: string; color: string }>();
-function extStyle(ext: string) {
-  const key = ext.toLowerCase();
-  const known = EXT_STYLE[key];
-  if (known) return known;
-  let fb = EXT_STYLE_FALLBACK.get(key);
-  if (!fb) {
-    fb = { label: ext.slice(0, 3).toUpperCase() || "FILE", color: "var(--text-3)" };
-    if (EXT_STYLE_FALLBACK.size >= 512) EXT_STYLE_FALLBACK.clear();
-    EXT_STYLE_FALLBACK.set(key, fb);
-  }
-  return fb;
-}
-
-function formatSize(n: number): string {
-  if (n <= 0) return "";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let i = 0;
-  let v = n;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
-}
-
-function formatDate(sec: number): string {
-  if (!sec) return "";
-  const d = new Date(sec * 1000);
-  const p = (x: number) => String(x).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(
-    d.getHours()
-  )}:${p(d.getMinutes())}`;
-}
 
 export default function App() {
   const [path, setPath] = useState("");
@@ -473,7 +396,7 @@ export default function App() {
         if (!silent) setLoading(false);
       }
     },
-    []
+    [clearNotice, showNotice]
   );
 
   // 记录访问历史：path 变化时置顶去重，最多保留 settings.addrHistLimit 条，持久化到 localStorage
@@ -528,6 +451,10 @@ export default function App() {
     } else {
       getDefaultDir().then(start);
     }
+    // 卸载或依赖变化时置位，避免旧一轮的异步续体在失效后继续 setDrives
+    return () => {
+      stop = true;
+    };
   }, [loadDir, settings.restoreLastPath]);
 
   // 主题落地 + system 模式跟随系统深浅色变化
@@ -654,7 +581,7 @@ const stepForward = useCallback(() => {
       window.clearTimeout(crumbCloseTimer.current);
       const r = el.getBoundingClientRect();
       const left = Math.max(4, Math.min(r.left, window.innerWidth - 224));
-      let items: string[] = [];
+      let items: string[];
       try {
         items = await listSubdirs(dir);
       } catch {
@@ -940,7 +867,6 @@ const stepForward = useCallback(() => {
     }
     if (el.scrollWidth <= el.clientWidth) return; // 当前保留段数已放得下
     setKeepTail((k) => Math.max(1, (k < 0 ? n - 1 : k) - 1));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [breadcrumbs, path, keepTail]);
 
   // 长路径渲染：保留尾部文件夹（含当前目录），过长时从根/左侧省略直至放得下
@@ -1300,7 +1226,7 @@ const stepForward = useCallback(() => {
     if (cursor < 0) return;
     renameCommitted.current = false;
     setRenamingIdx(cursor);
-  }, [cursor, visibleEntries]);
+  }, [cursor]);
 
   // 键盘把选中光标移到第 n 行时，若预览已打开则跟随光标：
   // 文件切换预览（手势内同步挂载保证带声自动播放）、目录关闭预览。
@@ -1463,7 +1389,7 @@ const stepForward = useCallback(() => {
         }
       }
     },
-    [visibleEntries, selected, startRename, reload, selectOnly, cursor, previewPath]
+    [visibleEntries, selected, selectOnly, cursor, previewPath, copyWithNotice]
   );
 
   // 取消选择后焦点在列表容器时，方向键重新起导航（光标 -1 时从首行开始）
@@ -1725,8 +1651,8 @@ const stepForward = useCallback(() => {
                         }}
                       >
                         ×
-                      </span>
-                    </button>
+                      </button>
+                    </div>
                   ))
                 )}
               </div>
@@ -2484,37 +2410,6 @@ const Row = memo(function Row({
   );
 });
 
-/** 轮询超时哨兵：网络路径读取在时限内未返回时由 withTimeout 返回 */
-const TIMEOUT = Symbol("poll-timeout");
-
-/** 竞速包装：ms 内未返回视为「超时」（TIMEOUT）；调用方自身失败返回 null，二者语义必须区分 */
-function withTimeout<T>(p: Promise<T | null>, ms: number): Promise<T | null | typeof TIMEOUT> {
-  return new Promise((resolve) => {
-    const t = window.setTimeout(() => resolve(TIMEOUT), ms);
-    p.then(
-      (v) => {
-        window.clearTimeout(t);
-        resolve(v);
-      },
-      () => {
-        // 失败（而非超时）交回 null，避免把「路径不可达/无权限」误报成「网络响应超时」
-        window.clearTimeout(t);
-        resolve(null);
-      }
-    );
-  });
-}
-
-/** 焦点是否在可编辑控件上：全局快捷键必须让位给输入框/文本域 */
-function isEditableTarget(t: HTMLElement): boolean {
-  return !!t.closest("input, textarea, select, [contenteditable='true']");
-}
-
-/** 焦点是否在自带按键语义的控件上：空格/回车要交给它们，不能被全局快捷键抢走 */
-function isInteractiveTarget(t: HTMLElement): boolean {
-  return !!t.closest("button, a, [role='button'], [role='menuitem']");
-}
-
 /**
  * 下拉菜单键盘导航：在容器内已渲染的 menuitem 之间移动焦点。
  * 原生 <button> 的 Enter/空格由浏览器自行触发 click，这里只补非按钮元素的激活。
@@ -2557,26 +2452,6 @@ function menuKeyNav(ev: ReactKeyboardEvent<HTMLElement>, dismiss: () => void) {
   }
 }
 
-function parentOf(path: string): string | null {
-  // 按操作系统统一分隔符：Windows 用 \，macOS 用 /
-  const sep = isMac ? "/" : "\\";
-  const trimmed = path.endsWith(sep) && path.length > 1 ? path.slice(0, -1) : path;
-  if (!isMac && trimmed.startsWith("\\\\")) {
-    // UNC：\\server\share 是共享根，不可再上（\\server 仅为纯主机）；其下逐级返回上级
-    if (/^\\\\[^\\]+\\[^\\]+$/.test(trimmed)) return null; // 已是 \\server\share
-    const idx = trimmed.lastIndexOf("\\");
-    if (idx < 0) return null;
-    const parent = trimmed.slice(0, idx);
-    return parent.length > 0 ? parent : null;
-  }
-  const idx = trimmed.lastIndexOf(sep);
-  if (idx < 0) return null;
-  const parent = trimmed.slice(0, idx);
-  if (!parent) return null;
-  if (isMac) return parent === "/" ? "/" : parent; // macOS 根目录特殊处理
-  return parent.length === 2 ? parent + "\\" : parent;
-}
-
 type ContextMenuProps = {
   x: number;
   y: number;
@@ -2604,46 +2479,62 @@ function ContextMenu(props: ContextMenuProps) {
   const menuRef = useRef<HTMLDivElement | null>(null);
   const itemRefs = useRef<(HTMLDivElement | null)[]>([]);
 
-  // 组装菜单项：统一渲染便于键盘导航
-  const items: { key: string; label: string; danger: boolean; accel?: string; action: () => void }[] = [];
-  const showClearTags = single ? single.tags.length > 0 : paths.length > 1;
-  if (!paths.length) {
-    items.push({ key: "refresh", label: "刷新", danger: false, action: onRefresh });
-  } else {
-    if (single)
-      items.push({
-        key: "open",
-        label: single.is_dir ? "打开文件夹" : "打开文件",
-        danger: false,
-        action: onOpenEntry,
-      });
-    // 复制类操作：仅单选时展示，多选场景路径/文件名含义模糊
-    // 加速键文案跟随平台惯例（macOS 显示 ⌘，与处理器的 metaKey 分支一致）
-    if (single) {
-      items.push({
-        key: "copyname",
-        label: "复制文件名",
-        danger: false,
-        accel: isMac ? "⌘C" : "Ctrl+C",
-        action: onCopyName,
-      });
-      items.push({
-        key: "copypath",
-        label: "复制路径",
-        danger: false,
-        accel: isMac ? "⌘⇧C" : "Ctrl+Shift+C",
-        action: onCopyPath,
-      });
+  // 组装菜单项：统一渲染便于键盘导航。
+  // 用 useMemo 固定引用：否则键盘回调的依赖每次都变（菜单只在打开时渲染，实际开销本就不大）
+  const items = useMemo(() => {
+    const list: { key: string; label: string; danger: boolean; accel?: string; action: () => void }[] = [];
+    const showClearTags = single ? single.tags.length > 0 : paths.length > 1;
+    if (!paths.length) {
+      list.push({ key: "refresh", label: "刷新", danger: false, action: onRefresh });
+    } else {
+      if (single)
+        list.push({
+          key: "open",
+          label: single.is_dir ? "打开文件夹" : "打开文件",
+          danger: false,
+          action: onOpenEntry,
+        });
+      // 复制类操作：仅单选时展示，多选场景路径/文件名含义模糊
+      // 加速键文案跟随平台惯例（macOS 显示 ⌘，与处理器的 metaKey 分支一致）
+      if (single) {
+        list.push({
+          key: "copyname",
+          label: "复制文件名",
+          danger: false,
+          accel: isMac ? "⌘C" : "Ctrl+C",
+          action: onCopyName,
+        });
+        list.push({
+          key: "copypath",
+          label: "复制路径",
+          danger: false,
+          accel: isMac ? "⌘⇧C" : "Ctrl+Shift+C",
+          action: onCopyPath,
+        });
+      }
+      if (single) list.push({ key: "rename", label: "重命名", danger: false, action: onRename });
+      // 解散文件夹：单选文件夹，或多选且全部为文件夹时可用
+      if ((single && single.is_dir) || (paths.length > 1 && allDirs))
+        list.push({ key: "dissolve", label: "解散文件夹", danger: false, action: onDissolve });
+      // 收入文件夹：单选或多选都可用，须有至少一项选中
+      list.push({ key: "collect", label: "收入到文件夹", danger: false, action: onCollect });
+      if (showClearTags)
+        list.push({ key: "cleartags", label: "移除全部标签", danger: false, action: onClearTags });
     }
-    if (single) items.push({ key: "rename", label: "重命名", danger: false, action: onRename });
-    // 解散文件夹：单选文件夹，或多选且全部为文件夹时可用
-    if ((single && single.is_dir) || (paths.length > 1 && allDirs))
-      items.push({ key: "dissolve", label: "解散文件夹", danger: false, action: onDissolve });
-    // 收入文件夹：单选或多选都可用，须有至少一项选中
-    items.push({ key: "collect", label: "收入到文件夹", danger: false, action: onCollect });
-    if (showClearTags)
-      items.push({ key: "cleartags", label: "移除全部标签", danger: false, action: onClearTags });
-  }
+    return list;
+  }, [
+    paths,
+    single,
+    allDirs,
+    onRefresh,
+    onOpenEntry,
+    onCopyName,
+    onCopyPath,
+    onRename,
+    onDissolve,
+    onCollect,
+    onClearTags,
+  ]);
 
   // 键盘导航焦点下标
   const [focusIdx, setFocusIdx] = useState(0);

@@ -5,6 +5,7 @@ import { Marked } from "marked";
 import DOMPurify from "dompurify";
 import type { FileEntry } from "./types";
 import { openInDefault, openUrlInDefault, previewAssetUrl, readTextPreview } from "./api";
+import { dirnameOf, escapeHtml, joinPath } from "./util";
 import { IconClose, IconMusic, IconPause, IconPlay } from "./icons";
 
 // 预览支持的文件扩展名白名单（小写）
@@ -86,6 +87,8 @@ export default function PreviewPane({ entry, onClose, onNotice }: PreviewPanePro
     };
     // 依赖路径而非 entry 对象：reload 每次都会生成全新的 entry 对象，
     // 若按对象身份比较，任何自动刷新（UNC 轮询下每 3 秒）都会重读 1 MiB 文本。
+    // 同路径下 ext 不可能变化，故这里刻意只依赖 path。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entry?.path]);
 
   // Markdown 富文本：文本读取完成后渲染；失败时记录可读错误，用于回退源文本并提示定位
@@ -105,6 +108,7 @@ export default function PreviewPane({ entry, onClose, onNotice }: PreviewPanePro
       setMdError(String(err));
     }
     // 同上传入路径而非对象：同路径的 entry 对象被 reload 换新时无需重新解析 Markdown
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entry?.path, textContent]);
 
   // 媒体加载失败：按 code 给出友好提示（4=格式不支持，3=损坏，2=读取失败）
@@ -486,27 +490,6 @@ function AudioPlayer({ url, entry }: { url: string; entry: FileEntry }) {
       />
     </div>
   );
-}
-
-/** 取路径所在目录（兼容 Windows \ 与 macOS / 分隔符） */
-function dirnameOf(p: string): string {
-  const i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
-  return i > 0 ? p.slice(0, i) : ".";
-}
-
-/** 目录 + 相对路径拼接为系统风格绝对路径 */
-function joinPath(dir: string, rel: string): string {
-  const sep = dir.includes("\\") ? "\\" : "/";
-  return (dir.endsWith(sep) ? dir : dir + sep) + rel.replace(/[\\/]/g, sep);
-}
-
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
 }
 
 /** 目录 -> Marked 实例：renderer 需闭包捕获「文件所在目录」，按目录缓存，避免每次渲染都重新构造 */

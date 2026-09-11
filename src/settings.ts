@@ -26,7 +26,7 @@ const THEME_MODES: ThemeMode[] = ["system", "light", "dark"];
 
 /** 宽容解析本地设置：字段缺失/类型错/越界均回退默认并 clamp。 */
 export function loadSettings(): Settings {
-  let raw: unknown = null;
+  let raw: unknown;
   try {
     raw = JSON.parse(window.localStorage.getItem(SETTINGS_KEY) ?? "{}");
   } catch {

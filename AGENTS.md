@@ -51,7 +51,9 @@
 
 - **避免重复加载**：应用内操作（打标签/删除/重命名）后显式 reload 了就不应再由本次触发的事件重复 reload（用 `selfOpAt` 短窗口标记跳过自身 watch）。
 
-- 验证：改动后用 `npx tsc --noEmit`（前端；package.json 未定义 `tsc` 脚本，`npm run tsc` 会报 Missing script）、`cargo check` / `cargo test`（后端）确认通过。
+- 验证：改动后用 `npx tsc --noEmit` + `npm test` + `npm run lint`（前端；package.json 未定义 `tsc` 脚本，`npm run tsc` 会报 Missing script）、`cargo check` / `cargo test`（后端）确认通过。
+
+- **前端纯逻辑要抽到 `src/util.ts` 并配 `*.test.ts`**（vitest，`environment: node`，涉及 DOM 的用最小桩对象）：格式化、路径解析、键盘目标判定、超时包装等都不应只存在于组件内部。
 
 ## 界面与体验约定
 

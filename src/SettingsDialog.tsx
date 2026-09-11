@@ -68,9 +68,8 @@ export function SettingsDialog(props: SettingsDialogProps) {
                     if (next < 0) return;
                     ev.preventDefault();
                     onChange({ theme: THEME_OPTIONS[next].value });
-                    ev.currentTarget
-                      .querySelectorAll<HTMLButtonElement>('[role="radio"]')
-                      [next]?.focus();
+                    const btns = ev.currentTarget.querySelectorAll<HTMLButtonElement>('[role="radio"]');
+                    btns[next]?.focus();
                   }}
                 >
                   {THEME_OPTIONS.map((opt) => (
