@@ -56,6 +56,11 @@ export function collectIntoFolder(items: string[], folderName: string): Promise<
   return invoke<string>("collect_into_folder", { items, folderName });
 }
 
+/** 内部拖放的「剪切」：把若干项移动到已存在的文件夹（可撤销，走 History 栈） */
+export function moveIntoFolder(items: string[], destDir: string): Promise<void> {
+  return invoke<void>("move_into_folder", { items, destDir });
+}
+
 export function undo(): Promise<void> {
   return invoke<void>("undo");
 }

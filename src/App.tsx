@@ -15,6 +15,7 @@ import type {
 } from "react";
 import { flushSync } from "react-dom";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getVersion } from "@tauri-apps/api/app";
 import { watchImmediate } from "@tauri-apps/plugin-fs";
 import { startDrag } from "@crabnebula/tauri-plugin-drag";
@@ -28,6 +29,7 @@ import {
   getHomeDir,
   listDir,
   listSubdirs,
+  moveIntoFolder,
   openInDefault,
   removeTag,
   renameFile,
@@ -73,6 +75,7 @@ import {
   isInteractiveTarget,
   isMac,
   parentOf,
+  rowAtPoint,
   tagColor,
   withTimeout,
 } from "./util";
@@ -219,6 +222,12 @@ export default function App() {
   // 但若直接依赖 selected，每次点击/框选都会换掉 reload 的身份，进而重建文件监听与 UNC 轮询。
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
+  // 当前目录条目的同步镜像：拖放监听回调里要判断"落下的路径是否属于本目录"（内部拖放），
+  // 用 ref 读取可避免把 entries 放进事件监听的依赖里反复重注册。
+  const entriesRef = useRef<FileEntry[]>([]);
+  entriesRef.current = entries;
+  // 内部拖放：当前被悬停命中的文件夹行路径（用于落点高亮）
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   // 搜索输入即时回显，但对大目录的过滤+排序（visibleEntries）走延迟值，
   // 避免每敲一个字符都同步阻塞在主线程上重排全表。
@@ -957,6 +966,64 @@ const stepForward = useCallback(() => {
       unlisten?.();
     };
   }, [path, reload, showNotice, clearNotice]);
+
+  /** 内部拖放「剪切」：把 paths 移动到目标文件夹并给出反馈 */
+  const moveIntoFolderFrom = useCallback(
+    async (dest: string, paths: string[]) => {
+      selfOpAt.current = Date.now();
+      try {
+        await moveIntoFolder(paths, dest);
+        await reload();
+        const name = dest.split(/[\\/]/).filter(Boolean).pop() ?? dest;
+        showNotice("success", `已移动 ${paths.length} 项到「${name}」`);
+      } catch (e) {
+        showNotice("error", String(e));
+      }
+    },
+    [reload, showNotice]
+  );
+
+  // 内部拖放：条目拖拽走的是原生 OS 拖拽（为了给外部应用真实文件句柄），
+  // 落回本窗口时由 webview 的拖放事件回传落点，这里按落点命中的文件夹行执行「剪切移动」。
+  // 只处理属于当前目录的条目：从系统拖进来的外部文件一律不动，避免误改用户文件。
+  useEffect(() => {
+    let alive = true;
+    let unlisten: (() => void) | undefined;
+    getCurrentWebview()
+      .onDragDropEvent((ev) => {
+        if (!alive) return;
+        const p = ev.payload;
+        if (p.type === "leave") {
+          setDropTarget(null);
+          return;
+        }
+        const dpr = window.devicePixelRatio || 1;
+        // 事件里是物理像素；个别平台按逻辑像素上报，故兜底再试一次原始坐标
+        const hit =
+          rowAtPoint(p.position.x / dpr, p.position.y / dpr) ??
+          rowAtPoint(p.position.x, p.position.y);
+        if (p.type === "over") {
+          const next = hit?.isDir ? hit.path : null;
+          setDropTarget((cur) => (cur === next ? cur : next));
+          return;
+        }
+        // drop
+        setDropTarget(null);
+        if (!hit?.isDir) return;
+        const internal = p.paths.filter((q) => entriesRef.current.some((en) => en.path === q));
+        if (internal.length === 0) return;
+        void moveIntoFolderFrom(hit.path, internal);
+      })
+      .then((fn) => {
+        if (alive) unlisten = fn;
+        else fn();
+      })
+      .catch((e) => console.error("注册拖放监听失败:", e));
+    return () => {
+      alive = false;
+      unlisten?.();
+    };
+  }, [moveIntoFolderFrom]);
 
   // 地址栏进入编辑态时聚焦并全选
   useEffect(() => {
@@ -2026,6 +2093,7 @@ const stepForward = useCallback(() => {
                     isSelected={selected.has(e.path)}
                     isRenaming={idx === renamingIdx}
                     isDissolving={dissolving.has(e.path)}
+                    isDropTarget={dropTarget === e.path}
                     renameRef={renameRef}
                     actions={rowActionsRef}
                   />
@@ -2321,6 +2389,8 @@ type RowProps = {
   isSelected: boolean;
   isRenaming: boolean;
   isDissolving: boolean;
+  /** 是否正处于内部拖放的落点（文件夹行高亮） */
+  isDropTarget: boolean;
   renameRef: { current: HTMLInputElement | null };
   actions: { current: RowActions };
 };
@@ -2338,6 +2408,7 @@ const Row = memo(function Row({
   isSelected,
   isRenaming,
   isDissolving,
+  isDropTarget,
   renameRef,
   actions,
 }: RowProps) {
@@ -2347,7 +2418,10 @@ const Row = memo(function Row({
       tabIndex={isCursor ? 0 : -1}
       role="option"
       aria-selected={isSelected}
-      className={`row ${isCursor ? "focused" : ""} ${isSelected ? "selected" : ""} ${isDissolving ? "row-dissolving" : ""}`}
+      // data-row-* 供内部拖放的落点命中使用（见 util.rowAtPoint）
+      data-row-path={e.path}
+      data-row-is-dir={e.is_dir ? "1" : "0"}
+      className={`row ${isCursor ? "focused" : ""} ${isSelected ? "selected" : ""} ${isDissolving ? "row-dissolving" : ""} ${isDropTarget ? "drop-target" : ""}`}
       draggable={!isRenaming}
       onDragStart={(ev) => actions.current.dragStart(ev, e)}
       onClick={(ev) => actions.current.click(ev, e, idx)}

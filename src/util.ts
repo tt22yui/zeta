@@ -162,6 +162,19 @@ export function isInteractiveTarget(t: HTMLElement): boolean {
   return !!t.closest("button, a, [role='button'], [role='menuitem']");
 }
 
+/**
+ * 原生拖放落点命中的列表行（内部拖放「剪切」用）。坐标按 CSS 像素。
+ * 行元素在渲染时带 data-row-path / data-row-is-dir，这里只做几何命中，不依赖 React 状态；
+ * 返回 null 表示落点不在任何行上。
+ */
+export function rowAtPoint(x: number, y: number): { path: string; isDir: boolean } | null {
+  const el = document.elementFromPoint(x, y) as HTMLElement | null;
+  const row = el?.closest<HTMLElement>("[data-row-path]") ?? null;
+  const path = row?.dataset.rowPath;
+  if (!row || !path) return null;
+  return { path, isDir: row.dataset.rowIsDir === "1" };
+}
+
 /* ------------------------------ 异步 ------------------------------ */
 
 /** 轮询超时哨兵：网络路径读取在时限内未返回时由 withTimeout 返回 */

@@ -24,7 +24,8 @@ extern "system" {
 /// 一次可撤销的操作。
 /// Rename = 单次移动/改名；
 /// DissolveFolder = 解散文件夹（多步移动 + 删空壳，整体撤销/重做）；
-/// CollectFolder = 收入文件夹（新建文件夹 + 多步移入，整体撤销/重做，是 DissolveFolder 的反向）。
+/// CollectFolder = 收入文件夹（新建文件夹 + 多步移入，整体撤销/重做，是 DissolveFolder 的反向）；
+/// MoveInto = 内部拖放的「剪切」：把若干项移动到已存在的文件夹（撤销即逐项移回，不涉及删目录）。
 #[derive(Clone)]
 enum HistoryOp {
     Rename { from: String, to: String },
@@ -35,6 +36,9 @@ enum HistoryOp {
     CollectFolder {
         folder: String,
         moved: Vec<(String, String)>, // (原路径 parent/item, 新路径 folder/item)
+    },
+    MoveInto {
+        moved: Vec<(String, String)>, // (原路径, 新路径)
     },
 }
 
@@ -548,6 +552,17 @@ fn apply_undo(op: &HistoryOp) -> Result<(), String> {
                 return Err(format!("{}；{}", e, note));
             }
         }
+        HistoryOp::MoveInto { moved } => {
+            // 撤销 = 逐项移回原处；先全量预检，避免移回一半才发现原位被占
+            let plan: Vec<(String, String)> =
+                moved.iter().map(|(f, t)| (t.clone(), f.clone())).collect();
+            for (_, to) in &plan {
+                if Path::new(to).exists() {
+                    return Err(format!("无法撤销：目标已存在：{}", to));
+                }
+            }
+            move_all(&plan)?;
+        }
     }
     Ok(())
 }
@@ -597,6 +612,17 @@ fn apply_redo(op: &HistoryOp) -> Result<(), String> {
                 let _ = fs::remove_dir(folder);
                 return Err(e);
             }
+        }
+        HistoryOp::MoveInto { moved } => {
+            // 重做 = 再移动到目标文件夹，同样先全量预检
+            let plan: Vec<(String, String)> =
+                moved.iter().map(|(f, t)| (f.clone(), t.clone())).collect();
+            for (_, to) in &plan {
+                if Path::new(to).exists() {
+                    return Err(format!("无法重做：目标已存在：{}", to));
+                }
+            }
+            move_all(&plan)?;
         }
     }
     Ok(())
@@ -793,6 +819,89 @@ fn collect_into_folder(
     Ok(folder)
 }
 
+/// 内部拖放的「剪切」纯逻辑：把 items 移动到已存在的文件夹 dest。
+/// 校验：目标必须是目录；不能把某项移到它自身或其子目录；不能移到它已在的目录；
+/// 同名冲突按 "名字 (n)" 递增（参照资源管理器「保留双方」）。
+/// 返回移动记录 (原路径, 新路径) 供撤销使用；任一移动失败会整体回滚。
+/// 纯逻辑：可独立单元测试（不依赖 Tauri 运行时）。
+fn move_into_folder_inner(items: &[String], dest: &str) -> Result<Vec<(String, String)>, String> {
+    if items.is_empty() {
+        return Err("未选中任何项".to_string());
+    }
+    let dest_path = Path::new(dest);
+    if !dest_path.is_dir() {
+        return Err("目标不是文件夹".to_string());
+    }
+
+    let mut planned: HashSet<String> = HashSet::new();
+    let mut plan: Vec<(String, String)> = Vec::with_capacity(items.len());
+    for s in items {
+        let src = Path::new(s);
+        let name = src
+            .file_name()
+            .ok_or_else(|| "路径无文件名".to_string())?
+            .to_string_lossy()
+            .to_string();
+        if !src.exists() {
+            return Err(format!("路径不存在：{}", s));
+        }
+        // 自身与其子目录都不能作为目标：否则会把目录移进自己内部，导致数据丢失
+        if dest_path == src || dest_path.starts_with(src) {
+            return Err(format!("不能把「{}」移动到它自身或其子目录中", name));
+        }
+        // 已在目标目录中则无需移动（比较时忽略结尾分隔符，避免 "C:\a\" 与 "C:\a" 误判）
+        let same_dir = |a: &Path, b: &Path| {
+            let trim = |p: &Path| p.to_string_lossy().trim_end_matches(['\\', '/']).to_string();
+            trim(a) == trim(b)
+        };
+        if let Some(parent) = src.parent() {
+            if same_dir(parent, dest_path) {
+                return Err(format!("「{}」已在该文件夹中", name));
+            }
+        }
+        let mut target = dest_path.join(&name);
+        if target_taken(&target, &planned) {
+            let stem = Path::new(&name)
+                .file_stem()
+                .map(|v| v.to_string_lossy().to_string())
+                .unwrap_or_else(|| name.clone());
+            let ext = Path::new(&name)
+                .extension()
+                .map(|v| format!(".{}", v.to_string_lossy()))
+                .unwrap_or_default();
+            let mut n = 2;
+            loop {
+                let candidate = dest_path.join(format!("{} ({}){}", stem, n, ext));
+                if !target_taken(&candidate, &planned) {
+                    target = candidate;
+                    break;
+                }
+                n += 1;
+            }
+        }
+        planned.insert(target.to_string_lossy().to_string());
+        plan.push((
+            s.clone(),
+            target.to_string_lossy().to_string(),
+        ));
+    }
+
+    move_all(&plan)?;
+    Ok(plan)
+}
+
+/// 把选中项移动到目标文件夹（内部拖放的剪切，可撤销，走 History 栈）。
+#[tauri::command(async)]
+fn move_into_folder(
+    items: Vec<String>,
+    dest_dir: String,
+    state: State<History>,
+) -> Result<(), String> {
+    let moved = move_into_folder_inner(&items, &dest_dir)?;
+    state.record(HistoryOp::MoveInto { moved });
+    Ok(())
+}
+
 /// 文本预览结果：截断后的文本 + 是否被截断
 #[derive(Serialize)]
 struct TextPreview {
@@ -892,6 +1001,7 @@ pub fn run() {
             can_redo,
             dissolve_folder,
             collect_into_folder,
+            move_into_folder,
             read_text_preview
         ])
         // 启动期窗口逻辑：按显示器缩放(物理像素)与工作区分辨率将窗口居中；
@@ -1691,5 +1801,171 @@ mod tests {
         assert!(!is_unc("/Users/public"));
         assert!(!is_unc("/"));
         assert!(!is_unc(""));
+    }
+
+    /// 内部拖放剪切：把文件与文件夹移动到已存在的目标文件夹。
+    #[test]
+    fn move_into_folder_moves_files_and_dirs() {
+        let root = std::env::temp_dir().join("zeta_move_into_basic");
+        let _ = std::fs::remove_dir_all(&root);
+        let dest = root.join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let a = root.join("a.txt");
+        let sub = root.join("sub");
+        std::fs::write(&a, "a").unwrap();
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("inner.txt"), "x").unwrap();
+
+        let items = vec![
+            a.to_string_lossy().to_string(),
+            sub.to_string_lossy().to_string(),
+        ];
+        let moved = move_into_folder_inner(&items, &dest.to_string_lossy()).unwrap();
+
+        assert_eq!(moved.len(), 2);
+        assert!(dest.join("a.txt").exists());
+        assert!(dest.join("sub").join("inner.txt").exists());
+        assert!(!a.exists() && !sub.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 目标已有同名项：按 "名字 (2).ext" 递增，双方都保留。
+    #[test]
+    fn move_into_folder_appends_suffix_on_collision() {
+        let root = std::env::temp_dir().join("zeta_move_into_collision");
+        let _ = std::fs::remove_dir_all(&root);
+        let dest = root.join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("dup.txt"), "in_dest").unwrap();
+        let src = root.join("dup.txt");
+        std::fs::write(&src, "at_root").unwrap();
+
+        let items = vec![src.to_string_lossy().to_string()];
+        let moved = move_into_folder_inner(&items, &dest.to_string_lossy()).unwrap();
+
+        assert_eq!(moved.len(), 1);
+        assert!(dest.join("dup.txt").exists()); // 原有文件保留
+        assert!(dest.join("dup (2).txt").exists()); // 被移动的改名
+        assert_eq!(std::fs::read_to_string(dest.join("dup.txt")).unwrap(), "in_dest");
+        assert_eq!(std::fs::read_to_string(dest.join("dup (2).txt")).unwrap(), "at_root");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 中途失败（选中项已被外部删除）要整体回滚，不留半成品。
+    #[test]
+    fn move_into_folder_rolls_back_on_missing_item() {
+        let root = std::env::temp_dir().join("zeta_move_into_rollback");
+        let _ = std::fs::remove_dir_all(&root);
+        let dest = root.join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let a = root.join("a.txt");
+        std::fs::write(&a, "a").unwrap();
+
+        let items = vec![
+            a.to_string_lossy().to_string(),
+            root.join("missing.txt").to_string_lossy().to_string(),
+        ];
+        let err = move_into_folder_inner(&items, &dest.to_string_lossy()).unwrap_err();
+        assert!(err.contains("路径不存在"), "err={err}");
+        // 预检在第一项之前完成，故第一个文件根本没被移动
+        assert!(a.exists());
+        assert!(!dest.join("a.txt").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 不能把文件夹移动到它自身或其子目录（否则会丢数据）。
+    #[test]
+    fn move_into_folder_rejects_self_and_descendant() {
+        let root = std::env::temp_dir().join("zeta_move_into_self");
+        let _ = std::fs::remove_dir_all(&root);
+        let outer = root.join("outer");
+        let inner = outer.join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+
+        let items = vec![outer.to_string_lossy().to_string()];
+        // 移进自身
+        let e1 = move_into_folder_inner(&items, &outer.to_string_lossy()).unwrap_err();
+        assert!(e1.contains("自身或其子目录"), "err={e1}");
+        // 移进自己的子目录
+        let e2 = move_into_folder_inner(&items, &inner.to_string_lossy()).unwrap_err();
+        assert!(e2.contains("自身或其子目录"), "err={e2}");
+        // 均未产生副作用
+        assert!(outer.exists() && inner.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 目标不是目录、或项已在目标目录中，都要报错且不移动。
+    #[test]
+    fn move_into_folder_rejects_non_dir_and_same_dir() {
+        let root = std::env::temp_dir().join("zeta_move_into_rejects");
+        let _ = std::fs::remove_dir_all(&root);
+        let dest = root.join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let a = root.join("a.txt");
+        std::fs::write(&a, "a").unwrap();
+
+        // 目标不是目录
+        let items = vec![a.to_string_lossy().to_string()];
+        let e1 = move_into_folder_inner(&items, &a.to_string_lossy()).unwrap_err();
+        assert!(e1.contains("目标不是文件夹"), "err={e1}");
+
+        // 已在目标目录中（dest/a.txt 移到 dest）
+        let in_dest = dest.join("b.txt");
+        std::fs::write(&in_dest, "b").unwrap();
+        let items2 = vec![in_dest.to_string_lossy().to_string()];
+        let e2 = move_into_folder_inner(&items2, &dest.to_string_lossy()).unwrap_err();
+        assert!(e2.contains("已在该文件夹中"), "err={e2}");
+        assert!(in_dest.exists());
+
+        // 空列表
+        assert!(move_into_folder_inner(&[], &dest.to_string_lossy()).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 撤销/重做 MoveInto：往返后回到原位。
+    #[test]
+    fn apply_undo_redo_roundtrip_move_into() {
+        let root = std::env::temp_dir().join("zeta_move_into_undo");
+        let _ = std::fs::remove_dir_all(&root);
+        let dest = root.join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let a = root.join("a.txt");
+        std::fs::write(&a, "a").unwrap();
+
+        let items = vec![a.to_string_lossy().to_string()];
+        let moved = move_into_folder_inner(&items, &dest.to_string_lossy()).unwrap();
+        let op = HistoryOp::MoveInto { moved };
+        assert!(dest.join("a.txt").exists());
+
+        apply_undo(&op).unwrap();
+        assert!(a.exists(), "撤销后应回到原位");
+        assert!(!dest.join("a.txt").exists());
+
+        apply_redo(&op).unwrap();
+        assert!(dest.join("a.txt").exists(), "重做后应再次移入");
+        assert!(!a.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 撤销 MoveInto 时若原位已被占用，必须报错且不改动任何文件。
+    #[test]
+    fn apply_undo_move_into_fails_when_original_taken() {
+        let root = std::env::temp_dir().join("zeta_move_into_undo_conflict");
+        let _ = std::fs::remove_dir_all(&root);
+        let dest = root.join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let a = root.join("a.txt");
+        std::fs::write(&a, "a").unwrap();
+        let moved = move_into_folder_inner(&[a.to_string_lossy().to_string()], &dest.to_string_lossy())
+            .unwrap();
+        // 原位被重新占用
+        std::fs::write(&a, "占位").unwrap();
+
+        let op = HistoryOp::MoveInto { moved };
+        let err = apply_undo(&op).unwrap_err();
+        assert!(err.contains("无法撤销"), "err={err}");
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "占位");
+        assert!(dest.join("a.txt").exists(), "失败时不应移动文件");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

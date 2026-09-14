@@ -871,6 +871,14 @@ input { font: inherit; user-select: text; }
   box-shadow: inset 0 0 0 1px var(--border-strong);
 }
 
+/* 内部拖放落点：拖拽悬停在文件夹行上时高亮，提示"松手即剪切到这里"。
+   放在 .row.selected/.row.focused 之后，保证同等特异性下以落点高亮为准。 */
+.row.drop-target,
+.row.drop-target:hover {
+  background: var(--accent-soft2);
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
 .col { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 表头排序列 */
 button.col {

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, afterEach } from "vitest";
 import {
   TIMEOUT,
   dirnameOf,
@@ -10,6 +10,7 @@ import {
   isInteractiveTarget,
   joinPath,
   parentOfFor,
+  rowAtPoint,
   tagColor,
   withTimeout,
 } from "./util";
@@ -144,6 +145,48 @@ describe("键盘目标判定", () => {
     const div = { closest: () => null } as unknown as HTMLElement;
     expect(isInteractiveTarget(btn)).toBe(true);
     expect(isInteractiveTarget(div)).toBe(false);
+  });
+});
+
+describe("rowAtPoint（内部拖放落点命中）", () => {
+  /** 用最小 document/element 桩替代真实 DOM：只验证命中逻辑本身 */
+  function installDocStub(el: unknown) {
+    (globalThis as unknown as { document: unknown }).document = {
+      elementFromPoint: () => el as Element | null,
+    };
+  }
+  function rowEl(path: string | undefined, isDir: boolean) {
+    // closest 命中时返回的"行元素"需要带 dataset（生产代码从中读 data-row-*）
+    const row = { dataset: { rowPath: path, rowIsDir: isDir ? "1" : "0" } };
+    return {
+      closest: (sel: string) => (sel === "[data-row-path]" ? (row as never) : null),
+    };
+  }
+
+  afterEach(() => {
+    delete (globalThis as unknown as { document?: unknown }).document;
+  });
+
+  it("命中文件夹行时返回路径并标记为目录", () => {
+    installDocStub(rowEl("C:\\a\\sub", true));
+    expect(rowAtPoint(10, 20)).toEqual({ path: "C:\\a\\sub", isDir: true });
+  });
+
+  it("命中文件行时 isDir 为 false（调用方据此拒绝落点）", () => {
+    installDocStub(rowEl("C:\\a\\f.txt", false));
+    expect(rowAtPoint(10, 20)).toEqual({ path: "C:\\a\\f.txt", isDir: false });
+  });
+
+  it("落点不在列表行上时返回 null", () => {
+    installDocStub({ closest: () => null, dataset: {} });
+    expect(rowAtPoint(10, 20)).toBeNull();
+    installDocStub(null);
+    expect(rowAtPoint(10, 20)).toBeNull();
+  });
+
+  it("行元素缺少 data-row-path 时视为未命中", () => {
+    installDocStub(rowEl(undefined, true));
+    expect(rowAtPoint(10, 20)).toBeNull();
   });
 });
 

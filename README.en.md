@@ -26,6 +26,7 @@ A lightweight, cross-platform desktop file manager. Its core highlight is a **fi
 - **Omnibar address bar**: type a path directly (`~` expands to home), with visit history and favorite paths.
 - **Settings panel**: theme (system / light / dark), address-bar history size, restore last path on launch, tag separator.
 - **Drag to external apps**: drags carry real file handles, so dropping into Explorer / Feishu / WeCom works.
+- **Drop onto a folder to move**: drag items onto a folder row and release to move them into it (the drop target is highlighted; name clashes get a numeric suffix so both are kept).
 - **Cross-platform frameless window**: custom title bar with Windows/Linux right-side controls and macOS traffic-light buttons.
 
 ## Tech Stack
