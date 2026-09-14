@@ -55,6 +55,12 @@
 
 - **前端纯逻辑要抽到 `src/util.ts` 并配 `*.test.ts`**（vitest，`environment: node`，涉及 DOM 的用最小桩对象）：格式化、路径解析、键盘目标判定、超时包装等都不应只存在于组件内部。
 
+- **拖拽分两套机制，别混用**（历史经验，改动前务必先读）：
+  - 应用内拖拽（拖到文件夹行 = 剪切移动）走 **HTML5 拖拽**：`dragstart` 写入私有 MIME（`util.ts` 的 `writeInternalDrag`），文件夹行 `dragover` 里 `preventDefault` + `dropEffect = "move"` 才有落点。好处是逐行高亮同步、浏览器自带边缘自动滚动、光标为 move。
+  - 对外拖拽（给资源管理器/飞书等真实文件句柄）走 **`tauri-plugin-drag` 的原生 OS 拖拽**，由 `Alt` + 拖拽触发，语义是复制。
+  - 因此窗口配置 `dragDropEnabled` 必须为 `false`（Tauri 官方 schema：Windows 上使用 HTML5 拖放必须关闭它），且**两条路径不能合并到同一手势**：原生拖拽是主线程上的模态 OLE/AppKit 循环，会拖慢重绘与 IPC，落到同一手势上就会出现"高亮跟不上"的手感问题。
+  - `dragover`/`dragenter` 阶段浏览器不允许 `getData()`，判定是否为内部拖拽只能用 `types`（`hasInternalDrag`），数据只在 `drop` 阶段读（`readInternalDrag`）。
+
 ## 界面与体验约定
 
 > 参考成熟开源项目（Files 文件管理器、Raycast 等）的「交互流畅、界面简洁」经验提炼。

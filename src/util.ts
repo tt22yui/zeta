@@ -163,33 +163,37 @@ export function isInteractiveTarget(t: HTMLElement): boolean {
 }
 
 /**
- * 原生拖放落点命中的列表行（内部拖放「剪切」用）。坐标按 CSS 像素。
- * 行元素在渲染时带 data-row-path / data-row-is-dir，这里只做几何命中，不依赖 React 状态；
- * 返回 null 表示落点不在任何行上。
+ * 内部拖拽用的私有 MIME：用来区分「应用内拖动」与外部拖入的数据。
+ * 注意 dragover/dragenter 阶段浏览器出于安全不允许读 getData()，只能看 types，
+ * 因此判定"是不是内部拖拽"必须用 hasInternalDrag（看 types），数据只在 drop 时读。
  */
-export function rowAtPoint(x: number, y: number): { path: string; isDir: boolean } | null {
-  const el = document.elementFromPoint(x, y) as HTMLElement | null;
-  const row = el?.closest<HTMLElement>("[data-row-path]") ?? null;
-  const path = row?.dataset.rowPath;
-  if (!row || !path) return null;
-  return { path, isDir: row.dataset.rowIsDir === "1" };
+export const DND_MIME = "application/x-zeta-items";
+
+/** 把路径写入拖拽数据（应用内移动用） */
+export function writeInternalDrag(dt: DataTransfer, paths: string[]): void {
+  dt.setData(DND_MIME, JSON.stringify(paths));
+  dt.setData("text/plain", paths.join("\n")); // 兜底：其它页面/应用可读纯文本
+  dt.effectAllowed = "move"; // 内部语义是"移动"，光标随之显示移动样式
 }
 
-/**
- * 把光标物理坐标换算成 CSS 像素后命中行。
- * cursor_position 与拖放事件的坐标基准在平台间不一致（窗口相对 / 屏幕相对），
- * 因此两种约定都试一次：先按窗口相对，再减去窗口原点按屏幕相对。
- */
-export function hitRowAtCursor(
-  px: number,
-  py: number,
-  origin: { x: number; y: number },
-  scale: number
-): { path: string; isDir: boolean } | null {
-  return (
-    rowAtPoint(px / scale, py / scale) ??
-    rowAtPoint((px - origin.x) / scale, (py - origin.y) / scale)
-  );
+/** 是否为应用内拖拽（只看 types，dragover 阶段可用） */
+export function hasInternalDrag(dt: DataTransfer | null): boolean {
+  if (!dt) return false;
+  return Array.from(dt.types).includes(DND_MIME);
+}
+
+/** 读取应用内拖拽的路径列表（只能在 drop 阶段调用）；非应用内拖拽或数据损坏返回 null */
+export function readInternalDrag(dt: DataTransfer | null): string[] | null {
+  if (!dt) return null;
+  const raw = dt.getData(DND_MIME);
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length === 0) return null;
+    return parsed.every((p) => typeof p === "string" && p.length > 0) ? (parsed as string[]) : null;
+  } catch {
+    return null;
+  }
 }
 
 /* ------------------------------ 异步 ------------------------------ */

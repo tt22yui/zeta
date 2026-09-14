@@ -1,19 +1,21 @@
-import { describe, expect, it, vi, afterEach } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  DND_MIME,
   TIMEOUT,
   dirnameOf,
   escapeHtml,
   extStyle,
   formatDate,
   formatSize,
-  hitRowAtCursor,
+  hasInternalDrag,
   isEditableTarget,
   isInteractiveTarget,
   joinPath,
   parentOfFor,
-  rowAtPoint,
+  readInternalDrag,
   tagColor,
   withTimeout,
+  writeInternalDrag,
 } from "./util";
 
 describe("formatSize", () => {
@@ -149,87 +151,57 @@ describe("键盘目标判定", () => {
   });
 });
 
-describe("rowAtPoint（内部拖放落点命中）", () => {
-  /** 用最小 document/element 桩替代真实 DOM：只验证命中逻辑本身 */
-  function installDocStub(el: unknown) {
-    (globalThis as unknown as { document: unknown }).document = {
-      elementFromPoint: () => el as Element | null,
-    };
-  }
-  function rowEl(path: string | undefined, isDir: boolean) {
-    // closest 命中时返回的"行元素"需要带 dataset（生产代码从中读 data-row-*）
-    const row = { dataset: { rowPath: path, rowIsDir: isDir ? "1" : "0" } };
+describe("内部拖拽数据（应用内移动）", () => {
+  /** 最小 DataTransfer 桩：只需要 setData/getData/types/effectAllowed */
+  function makeDt(types: string[] = []) {
+    const store = new Map<string, string>();
     return {
-      closest: (sel: string) => (sel === "[data-row-path]" ? (row as never) : null),
-    };
+      store,
+      types,
+      effectAllowed: "none",
+      setData: (t: string, v: string) => void store.set(t, v),
+      getData: (t: string) => store.get(t) ?? "",
+    } as unknown as DataTransfer & { store: Map<string, string> };
   }
 
-  afterEach(() => {
-    delete (globalThis as unknown as { document?: unknown }).document;
+  it("写入后能被识别为内部拖拽，并带上纯文本兜底与 move 语义", () => {
+    const dt = makeDt();
+    writeInternalDrag(dt, ["C:\\a\\x.txt", "C:\\a\\y.txt"]);
+    expect(dt.effectAllowed).toBe("move");
+    const raw = (dt as unknown as { store: Map<string, string> }).store;
+    expect(JSON.parse(raw.get(DND_MIME) as string)).toEqual(["C:\\a\\x.txt", "C:\\a\\y.txt"]);
+    expect(raw.get("text/plain")).toBe("C:\\a\\x.txt\nC:\\a\\y.txt");
   });
 
-  it("命中文件夹行时返回路径并标记为目录", () => {
-    installDocStub(rowEl("C:\\a\\sub", true));
-    expect(rowAtPoint(10, 20)).toEqual({ path: "C:\\a\\sub", isDir: true });
+  it("hasInternalDrag 只看 types（dragover 阶段读不到 getData）", () => {
+    expect(hasInternalDrag(makeDt([DND_MIME, "text/plain"]))).toBe(true);
+    expect(hasInternalDrag(makeDt(["text/plain"]))).toBe(false);
+    expect(hasInternalDrag(makeDt(["Files"]))).toBe(false);
+    expect(hasInternalDrag(null)).toBe(false);
   });
 
-  it("命中文件行时 isDir 为 false（调用方据此拒绝落点）", () => {
-    installDocStub(rowEl("C:\\a\\f.txt", false));
-    expect(rowAtPoint(10, 20)).toEqual({ path: "C:\\a\\f.txt", isDir: false });
+  it("readInternalDrag 解析出路径列表（仅 drop 阶段可用）", () => {
+    const dt = makeDt();
+    writeInternalDrag(dt, ["/home/u/a"]);
+    expect(readInternalDrag(dt)).toEqual(["/home/u/a"]);
   });
 
-  it("落点不在列表行上时返回 null", () => {
-    installDocStub({ closest: () => null, dataset: {} });
-    expect(rowAtPoint(10, 20)).toBeNull();
-    installDocStub(null);
-    expect(rowAtPoint(10, 20)).toBeNull();
-  });
-
-  it("行元素缺少 data-row-path 时视为未命中", () => {
-    installDocStub(rowEl(undefined, true));
-    expect(rowAtPoint(10, 20)).toBeNull();
-  });
-
-  it("hitRowAtCursor：按窗口相对约定（物理像素 ÷ 缩放）命中", () => {
-    const seen: [number, number][] = [];
-    (globalThis as unknown as { document: unknown }).document = {
-      elementFromPoint: (x: number, y: number) => {
-        seen.push([x, y]);
-        // 只有窗口相对换算后的坐标才落在行上
-        return x === 100 && y === 50 ? (rowEl("C:\\a\\dir", true) as never) : null;
-      },
-    };
-    expect(hitRowAtCursor(200, 100, { x: 999, y: 999 }, 2)).toEqual({
-      path: "C:\\a\\dir",
-      isDir: true,
-    });
-    expect(seen[0]).toEqual([100, 50]);
-  });
-
-  it("hitRowAtCursor：窗口相对失配时退回屏幕相对（减去窗口原点）", () => {
-    const seen: [number, number][] = [];
-    (globalThis as unknown as { document: unknown }).document = {
-      elementFromPoint: (x: number, y: number) => {
-        seen.push([x, y]);
-        return x === 100 && y === 50 ? (rowEl("C:\\a\\dir", true) as never) : null;
-      },
-    };
-    // 光标物理坐标是屏幕相对：窗口原点 (200,100)、scale 1 → 相对坐标 (100,50)
-    expect(hitRowAtCursor(300, 150, { x: 200, y: 100 }, 1)).toEqual({
-      path: "C:\\a\\dir",
-      isDir: true,
-    });
-    expect(seen).toEqual([
-      [300, 150],
-      [100, 50],
-    ]);
-  });
-
-  it("hitRowAtCursor：两种约定都不命中时为 null", () => {
-    (globalThis as unknown as { document: unknown }).document = {
-      elementFromPoint: () => null,
-    };
-    expect(hitRowAtCursor(10, 20, { x: 0, y: 0 }, 1)).toBeNull();
+  it("非内部拖拽、空数组、损坏 JSON、混入非字符串都返回 null", () => {
+    const empty = makeDt();
+    expect(readInternalDrag(empty)).toBeNull(); // 没有该 MIME
+    const bad = makeDt();
+    bad.setData(DND_MIME, "{坏掉的");
+    expect(readInternalDrag(bad)).toBeNull();
+    const notArray = makeDt();
+    notArray.setData(DND_MIME, JSON.stringify({ a: 1 }));
+    expect(readInternalDrag(notArray)).toBeNull();
+    const mixed = makeDt();
+    mixed.setData(DND_MIME, JSON.stringify(["/ok", 42]));
+    expect(readInternalDrag(mixed)).toBeNull();
+    const emptyList = makeDt();
+    emptyList.setData(DND_MIME, JSON.stringify([]));
+    expect(readInternalDrag(emptyList)).toBeNull();
+    expect(readInternalDrag(null)).toBeNull();
   });
 });
 

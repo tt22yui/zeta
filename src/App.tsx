@@ -14,8 +14,7 @@ import type {
   MouseEvent as ReactMouseEvent,
 } from "react";
 import { flushSync } from "react-dom";
-import { getCurrentWindow, cursorPosition } from "@tauri-apps/api/window";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
 import { watchImmediate } from "@tauri-apps/plugin-fs";
 import { startDrag } from "@crabnebula/tauri-plugin-drag";
@@ -71,13 +70,15 @@ import {
   extStyle,
   formatDate,
   formatSize,
+  hasInternalDrag,
   isEditableTarget,
   isInteractiveTarget,
   isMac,
   parentOf,
-  hitRowAtCursor,
+  readInternalDrag,
   tagColor,
   withTimeout,
+  writeInternalDrag,
 } from "./util";
 
 const win = getCurrentWindow();
@@ -86,54 +87,70 @@ const win = getCurrentWindow();
 type NoticeSeverity = "info" | "success" | "warning" | "error";
 type Notice = { id: number; severity: NoticeSeverity; msg: string } | null;
 
-/** 拖拽图标缓存：图形固定，避免每次拖拽都新建 canvas 并做 PNG 编码 */
-let dragIconCache: string | null = null;
-
 /**
- * 生成原生拖拽的预览图标（透明 PNG data URI）。原生拖拽必须携带一张图片，
- * 这里用 canvas 画一个「文件堆叠」图形，避免依赖磁盘上的额外资源，任意文件类型通用。
+ * 拖拽影像（canvas）：多选时在右下角标出「N 项」。
+ * 一份画布同时服务两条路径：HTML5 拖拽用 setDragImage 直接传 canvas，
+ * Alt+拖拽（外部复制）则取 toDataURL 交给原生插件的 icon。
+ * 按数量缓存，避免每次拖拽重复绘制。
  */
-function makeDragIcon(): string {
-  if (dragIconCache !== null) return dragIconCache;
+const DRAG_ICONS = new Map<number, HTMLCanvasElement>();
+function makeDragCanvas(count: number): HTMLCanvasElement {
+  const cached = DRAG_ICONS.get(count);
+  if (cached) return cached;
   const c = document.createElement("canvas");
-  c.width = 64;
-  c.height = 64;
+  c.width = 72;
+  c.height = 72;
   const ctx = c.getContext("2d");
   if (ctx) {
-    ctx.clearRect(0, 0, 64, 64);
+    ctx.clearRect(0, 0, 72, 72);
     // 底层两页淡色，示意多文件
     ctx.fillStyle = "rgba(120,124,150,0.5)";
     ctx.beginPath();
-    ctx.roundRect(13, 24, 40, 38, 6);
+    ctx.roundRect(15, 27, 40, 38, 6);
     ctx.fill();
     ctx.fillStyle = "rgba(168,172,196,0.75)";
     ctx.beginPath();
-    ctx.roundRect(11, 13, 40, 38, 6);
+    ctx.roundRect(13, 16, 40, 38, 6);
     ctx.fill();
     // 首页白底
     ctx.fillStyle = "#ffffff";
     ctx.beginPath();
-    ctx.roundRect(9, 2, 40, 38, 6);
+    ctx.roundRect(11, 5, 40, 38, 6);
     ctx.fill();
     ctx.strokeStyle = "rgba(96,100,128,0.85)";
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.roundRect(9, 2, 40, 38, 6);
+    ctx.roundRect(11, 5, 40, 38, 6);
     ctx.stroke();
     // 内容示意线
     ctx.strokeStyle = "rgba(150,154,180,0.9)";
     ctx.lineWidth = 3;
     ctx.beginPath();
-    ctx.moveTo(17, 14);
-    ctx.lineTo(41, 14);
-    ctx.moveTo(17, 24);
-    ctx.lineTo(37, 24);
-    ctx.moveTo(17, 32);
-    ctx.lineTo(37, 32);
+    ctx.moveTo(19, 17);
+    ctx.lineTo(43, 17);
+    ctx.moveTo(19, 27);
+    ctx.lineTo(39, 27);
+    ctx.moveTo(19, 35);
+    ctx.lineTo(39, 35);
     ctx.stroke();
+    // 多选时标出数量，拖拽影像里就能看出"拖了几项"
+    if (count > 1) {
+      const label = count > 99 ? "99+" : String(count);
+      ctx.font = "600 15px system-ui, -apple-system, 'Segoe UI', sans-serif";
+      const w = ctx.measureText(label).width + 14;
+      ctx.fillStyle = "#5b5be0";
+      ctx.beginPath();
+      ctx.roundRect(72 - w - 2, 72 - 24, w, 22, 11);
+      ctx.fill();
+      ctx.fillStyle = "#ffffff";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, 72 - w / 2 - 2, 72 - 13);
+    }
   }
-  dragIconCache = c.toDataURL("image/png");
-  return dragIconCache;
+  if (DRAG_ICONS.size >= 32) DRAG_ICONS.clear(); // 防御无界增长
+  DRAG_ICONS.set(count, c);
+  return c;
 }
 
 
@@ -222,22 +239,12 @@ export default function App() {
   // 但若直接依赖 selected，每次点击/框选都会换掉 reload 的身份，进而重建文件监听与 UNC 轮询。
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
-  // 当前目录条目的同步镜像：拖放监听回调里要判断"落下的路径是否属于本目录"（内部拖放），
-  // 用 ref 读取可避免把 entries 放进事件监听的依赖里反复重注册。
-  const entriesRef = useRef<FileEntry[]>([]);
-  entriesRef.current = entries;
   // 内部拖放：当前被悬停命中的文件夹行路径（用于落点高亮）
   const [dropTarget, setDropTarget] = useState<string | null>(null);
-  // 是否正在拖拽（从 dragstart 到原生拖拽结束），用于展示"可放置"提示与轮询光标
+  // 是否正在拖拽：由 HTML5 的 dragstart/dragend 驱动，用于展示"可放置"提示
   const [dragging, setDragging] = useState(false);
   // 刚落下的目标文件夹行路径：给它一个短暂的"已接收"动画
   const [acceptedPath, setAcceptedPath] = useState<string | null>(null);
-  // 窗口原点（物理像素）与缩放：拖拽中把光标坐标换算成 CSS 像素需要
-  const winOriginRef = useRef({ x: 0, y: 0 });
-  const winScaleRef = useRef(1);
-  // 落点行路径的同步镜像：drop 事件回调里要用最新值兜底（事件监听注册时机早于状态更新）
-  const dropTargetRef = useRef<string | null>(null);
-  dropTargetRef.current = dropTarget;
   const [search, setSearch] = useState("");
   // 搜索输入即时回显，但对大目录的过滤+排序（visibleEntries）走延迟值，
   // 避免每敲一个字符都同步阻塞在主线程上重排全表。
@@ -996,81 +1003,6 @@ const stepForward = useCallback(() => {
     [reload, showNotice]
   );
 
-  // 拖拽中持续定位光标下的行：原生拖拽期间 webview 的 over 事件并不可靠，
-  // 这里主动轮询光标（物理像素）换算成 CSS 像素再命中行，保证"落点是哪个文件夹"一定看得见。
-  useEffect(() => {
-    if (!dragging) return;
-    let cancelled = false;
-    let inFlight = false;
-    const tick = async () => {
-      if (cancelled || inFlight) return;
-      inFlight = true;
-      try {
-        const p = await cursorPosition();
-        const scale = winScaleRef.current || window.devicePixelRatio || 1;
-        const hit = hitRowAtCursor(p.x, p.y, winOriginRef.current, scale);
-        const next = hit?.isDir ? hit.path : null;
-        setDropTarget((cur) => (cur === next ? cur : next));
-      } catch {
-        /* 拖拽中偶发取不到光标：忽略，下一轮再试 */
-      } finally {
-        inFlight = false;
-      }
-    };
-    const timer = window.setInterval(() => void tick(), 90);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [dragging]);
-
-  // 内部拖放：条目拖拽走的是原生 OS 拖拽（为了给外部应用真实文件句柄），
-  // 落回本窗口时由 webview 的拖放事件回传落点，这里按落点命中的文件夹行执行「剪切移动」。
-  // 只处理属于当前目录的条目：从系统拖进来的外部文件一律不动，避免误改用户文件。
-  useEffect(() => {
-    let alive = true;
-    let unlisten: (() => void) | undefined;
-    getCurrentWebview()
-      .onDragDropEvent((ev) => {
-        if (!alive) return;
-        const p = ev.payload;
-        if (p.type === "leave") {
-          setDropTarget(null);
-          return;
-        }
-        // enter/over 作为第二来源（自拖自落时 over 不一定送达，主来源是拖拽中的光标轮询）；
-        // 两者走同一套坐标候选，因此不会互相覆盖出跳变
-        if (p.type === "enter" || p.type === "over") {
-          const scale = winScaleRef.current || window.devicePixelRatio || 1;
-          const hit = hitRowAtCursor(p.position.x, p.position.y, winOriginRef.current, scale);
-          const next = hit?.isDir ? hit.path : null;
-          setDropTarget((cur) => (cur === next ? cur : next));
-          return;
-        }
-        if (p.type !== "drop") return;
-        setDropTarget(null);
-        // 兜底：若原生拖拽的 Promise 未能及时结束（例如被外部应用接管），这里也把"拖拽中"收掉
-        setDragging(false);
-        const scale = winScaleRef.current || window.devicePixelRatio || 1;
-        const hit = hitRowAtCursor(p.position.x, p.position.y, winOriginRef.current, scale);
-        // 命中失败时用当前高亮的落点兜底：只要界面上已经提示了目标，松手就应该落到那里
-        const dest = hit?.isDir ? hit.path : dropTargetRef.current;
-        if (!dest) return;
-        const internal = p.paths.filter((q) => entriesRef.current.some((en) => en.path === q));
-        if (internal.length === 0) return;
-        void moveIntoFolderFrom(dest, internal);
-      })
-      .then((fn) => {
-        if (alive) unlisten = fn;
-        else fn();
-      })
-      .catch((e) => console.error("注册拖放监听失败:", e));
-    return () => {
-      alive = false;
-      unlisten?.();
-    };
-  }, [moveIntoFolderFrom]);
-
   // 地址栏进入编辑态时聚焦并全选
   useEffect(() => {
     if (addrEdit && addrRef.current) {
@@ -1570,6 +1502,10 @@ const stepForward = useCallback(() => {
   const rowActionsRef = useRef<RowActions>({
     attachRef: () => {},
     dragStart: () => {},
+    dragOver: () => {},
+    dragLeave: () => {},
+    drop: () => {},
+    dragEnd: () => {},
     click: () => {},
     dblclick: () => {},
     keydown: () => {},
@@ -1583,31 +1519,51 @@ const stepForward = useCallback(() => {
       rowRefs.current[idx] = el;
     },
     dragStart: (ev, e) => {
-      // 取消 HTML5 拖拽，改用原生 OLE/NSDraggingSession 拖真实文件，
-      // 这样飞书/企微等要求真实文件句柄的外部应用才能接收。
-      ev.preventDefault();
       const paths = selected.has(e.path) && selected.size > 1 ? [...selected] : [e.path];
+      if (ev.altKey) {
+        // Alt+拖拽：交给原生 OS 拖拽（OLE/NSDraggingSession），供外部应用接收；
+        // 外部语义是"复制"，不改动源文件。
+        ev.preventDefault();
+        void startDrag({
+          item: paths,
+          icon: makeDragCanvas(paths.length).toDataURL("image/png"),
+          mode: "copy",
+        }).catch((err) => console.error("原生拖拽失败:", err));
+        return;
+      }
+      // 普通拖拽：应用内移动，交给 webview 自己的 HTML5 拖拽。
+      // 这样逐行 dragover 是同步的（高亮即时跟手）、有浏览器自带的边缘自动滚动、
+      // 光标也是"移动"语义；原生 OS 拖拽做不到这些（模态循环会拖慢重绘与 IPC）。
+      if (ev.dataTransfer) {
+        writeInternalDrag(ev.dataTransfer, paths);
+        ev.dataTransfer.setDragImage(makeDragCanvas(paths.length), 24, 24);
+      }
       setDragging(true);
-      void (async () => {
-        // 先取窗口原点与缩放：拖拽中轮询到的光标是物理像素，换算成 CSS 像素需要它们
-        try {
-          const [origin, scale] = await Promise.all([win.innerPosition(), win.scaleFactor()]);
-          winOriginRef.current = { x: origin.x, y: origin.y };
-          winScaleRef.current = scale || 1;
-        } catch {
-          /* 取不到就退回 devicePixelRatio */
-        }
-        // 让"可放置"提示先绘制出来：原生拖拽会接管消息循环，期间未必还能重绘
-        await new Promise((r) => setTimeout(r, 40));
-        try {
-          await startDrag({ item: paths, icon: makeDragIcon(), mode: "copy" });
-        } catch (err) {
-          console.error("原生拖拽失败:", err);
-        } finally {
-          setDragging(false);
-          setDropTarget(null);
-        }
-      })();
+    },
+    dragOver: (ev, e) => {
+      // 只接受应用内拖拽，且只接文件夹；dragover 阶段读不到数据，只能看 types
+      if (!e.is_dir || !hasInternalDrag(ev.dataTransfer)) return;
+      ev.preventDefault(); // 不 preventDefault 就不允许 drop
+      ev.dataTransfer.dropEffect = "move";
+      setDropTarget((cur) => (cur === e.path ? cur : e.path));
+    },
+    dragLeave: (ev, e) => {
+      // 移到行的子元素上也会触发 dragleave：只有真正离开本行才清掉高亮
+      const to = ev.relatedTarget as Node | null;
+      if (to && ev.currentTarget.contains(to)) return;
+      setDropTarget((cur) => (cur === e.path ? null : cur));
+    },
+    drop: (ev, e) => {
+      const paths = readInternalDrag(ev.dataTransfer);
+      if (!e.is_dir || !paths) return;
+      ev.preventDefault();
+      setDropTarget(null);
+      setDragging(false);
+      void moveIntoFolderFrom(e.path, paths);
+    },
+    dragEnd: () => {
+      setDragging(false);
+      setDropTarget(null);
     },
     click: (ev, e, idx) => {
       if (ev.shiftKey) {
@@ -2242,7 +2198,7 @@ const stepForward = useCallback(() => {
           <span className="hint hint-drag">
             {dropTarget
               ? "松手：移动到高亮的文件夹"
-              : "拖到文件夹行即可移动到该文件夹 · 拖出窗口可发送给其它应用"}
+              : "拖到文件夹行即可移动到该文件夹 · Alt+拖拽可复制到其它应用"}
           </span>
         ) : (
           /* 底部快捷提示：宽窗显示完整键盘捷径；窄窗收敛为高频句，避免被 55% 裁成断句 */
@@ -2448,6 +2404,10 @@ function FileGlyph({ entry }: { entry: FileEntry }) {
 type RowActions = {
   attachRef: (el: HTMLDivElement | null, idx: number) => void;
   dragStart: (ev: ReactDragEvent<HTMLDivElement>, entry: FileEntry) => void;
+  dragOver: (ev: ReactDragEvent<HTMLDivElement>, entry: FileEntry) => void;
+  dragLeave: (ev: ReactDragEvent<HTMLDivElement>, entry: FileEntry) => void;
+  drop: (ev: ReactDragEvent<HTMLDivElement>, entry: FileEntry) => void;
+  dragEnd: () => void;
   click: (ev: ReactMouseEvent<HTMLDivElement>, entry: FileEntry, idx: number) => void;
   dblclick: (entry: FileEntry) => void;
   keydown: (ev: ReactKeyboardEvent<HTMLDivElement>) => void;
@@ -2499,12 +2459,16 @@ const Row = memo(function Row({
       tabIndex={isCursor ? 0 : -1}
       role="option"
       aria-selected={isSelected}
-      // data-row-* 供内部拖放的落点命中使用（见 util.rowAtPoint）
+      // data-row-* 是行身份的显式标记，便于调试与将来做行级别的外部定位/测试
       data-row-path={e.path}
       data-row-is-dir={e.is_dir ? "1" : "0"}
       className={`row ${isCursor ? "focused" : ""} ${isSelected ? "selected" : ""} ${isDissolving ? "row-dissolving" : ""} ${isDroppable ? "droppable" : ""} ${isDropTarget ? "drop-target" : ""} ${isAccepted ? "drop-accepted" : ""}`}
       draggable={!isRenaming}
       onDragStart={(ev) => actions.current.dragStart(ev, e)}
+      onDragOver={(ev) => actions.current.dragOver(ev, e)}
+      onDragLeave={(ev) => actions.current.dragLeave(ev, e)}
+      onDrop={(ev) => actions.current.drop(ev, e)}
+      onDragEnd={() => actions.current.dragEnd()}
       onClick={(ev) => actions.current.click(ev, e, idx)}
       onDoubleClick={() => actions.current.dblclick(e)}
       onKeyDown={(ev) => actions.current.keydown(ev)}
