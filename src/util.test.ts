@@ -6,6 +6,7 @@ import {
   extStyle,
   formatDate,
   formatSize,
+  hitRowAtCursor,
   isEditableTarget,
   isInteractiveTarget,
   joinPath,
@@ -187,6 +188,48 @@ describe("rowAtPoint（内部拖放落点命中）", () => {
   it("行元素缺少 data-row-path 时视为未命中", () => {
     installDocStub(rowEl(undefined, true));
     expect(rowAtPoint(10, 20)).toBeNull();
+  });
+
+  it("hitRowAtCursor：按窗口相对约定（物理像素 ÷ 缩放）命中", () => {
+    const seen: [number, number][] = [];
+    (globalThis as unknown as { document: unknown }).document = {
+      elementFromPoint: (x: number, y: number) => {
+        seen.push([x, y]);
+        // 只有窗口相对换算后的坐标才落在行上
+        return x === 100 && y === 50 ? (rowEl("C:\\a\\dir", true) as never) : null;
+      },
+    };
+    expect(hitRowAtCursor(200, 100, { x: 999, y: 999 }, 2)).toEqual({
+      path: "C:\\a\\dir",
+      isDir: true,
+    });
+    expect(seen[0]).toEqual([100, 50]);
+  });
+
+  it("hitRowAtCursor：窗口相对失配时退回屏幕相对（减去窗口原点）", () => {
+    const seen: [number, number][] = [];
+    (globalThis as unknown as { document: unknown }).document = {
+      elementFromPoint: (x: number, y: number) => {
+        seen.push([x, y]);
+        return x === 100 && y === 50 ? (rowEl("C:\\a\\dir", true) as never) : null;
+      },
+    };
+    // 光标物理坐标是屏幕相对：窗口原点 (200,100)、scale 1 → 相对坐标 (100,50)
+    expect(hitRowAtCursor(300, 150, { x: 200, y: 100 }, 1)).toEqual({
+      path: "C:\\a\\dir",
+      isDir: true,
+    });
+    expect(seen).toEqual([
+      [300, 150],
+      [100, 50],
+    ]);
+  });
+
+  it("hitRowAtCursor：两种约定都不命中时为 null", () => {
+    (globalThis as unknown as { document: unknown }).document = {
+      elementFromPoint: () => null,
+    };
+    expect(hitRowAtCursor(10, 20, { x: 0, y: 0 }, 1)).toBeNull();
   });
 });
 

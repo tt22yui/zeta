@@ -14,7 +14,7 @@ import type {
   MouseEvent as ReactMouseEvent,
 } from "react";
 import { flushSync } from "react-dom";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWindow, cursorPosition } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getVersion } from "@tauri-apps/api/app";
 import { watchImmediate } from "@tauri-apps/plugin-fs";
@@ -75,7 +75,7 @@ import {
   isInteractiveTarget,
   isMac,
   parentOf,
-  rowAtPoint,
+  hitRowAtCursor,
   tagColor,
   withTimeout,
 } from "./util";
@@ -228,6 +228,16 @@ export default function App() {
   entriesRef.current = entries;
   // 内部拖放：当前被悬停命中的文件夹行路径（用于落点高亮）
   const [dropTarget, setDropTarget] = useState<string | null>(null);
+  // 是否正在拖拽（从 dragstart 到原生拖拽结束），用于展示"可放置"提示与轮询光标
+  const [dragging, setDragging] = useState(false);
+  // 刚落下的目标文件夹行路径：给它一个短暂的"已接收"动画
+  const [acceptedPath, setAcceptedPath] = useState<string | null>(null);
+  // 窗口原点（物理像素）与缩放：拖拽中把光标坐标换算成 CSS 像素需要
+  const winOriginRef = useRef({ x: 0, y: 0 });
+  const winScaleRef = useRef(1);
+  // 落点行路径的同步镜像：drop 事件回调里要用最新值兜底（事件监听注册时机早于状态更新）
+  const dropTargetRef = useRef<string | null>(null);
+  dropTargetRef.current = dropTarget;
   const [search, setSearch] = useState("");
   // 搜索输入即时回显，但对大目录的过滤+排序（visibleEntries）走延迟值，
   // 避免每敲一个字符都同步阻塞在主线程上重排全表。
@@ -974,6 +984,9 @@ const stepForward = useCallback(() => {
       try {
         await moveIntoFolder(paths, dest);
         await reload();
+        // 目标行闪一下"已接收"，让落点结果可见（目标文件夹仍在列表里）
+        setAcceptedPath(dest);
+        window.setTimeout(() => setAcceptedPath((cur) => (cur === dest ? null : cur)), 700);
         const name = dest.split(/[\\/]/).filter(Boolean).pop() ?? dest;
         showNotice("success", `已移动 ${paths.length} 项到「${name}」`);
       } catch (e) {
@@ -982,6 +995,34 @@ const stepForward = useCallback(() => {
     },
     [reload, showNotice]
   );
+
+  // 拖拽中持续定位光标下的行：原生拖拽期间 webview 的 over 事件并不可靠，
+  // 这里主动轮询光标（物理像素）换算成 CSS 像素再命中行，保证"落点是哪个文件夹"一定看得见。
+  useEffect(() => {
+    if (!dragging) return;
+    let cancelled = false;
+    let inFlight = false;
+    const tick = async () => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
+      try {
+        const p = await cursorPosition();
+        const scale = winScaleRef.current || window.devicePixelRatio || 1;
+        const hit = hitRowAtCursor(p.x, p.y, winOriginRef.current, scale);
+        const next = hit?.isDir ? hit.path : null;
+        setDropTarget((cur) => (cur === next ? cur : next));
+      } catch {
+        /* 拖拽中偶发取不到光标：忽略，下一轮再试 */
+      } finally {
+        inFlight = false;
+      }
+    };
+    const timer = window.setInterval(() => void tick(), 90);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [dragging]);
 
   // 内部拖放：条目拖拽走的是原生 OS 拖拽（为了给外部应用真实文件句柄），
   // 落回本窗口时由 webview 的拖放事件回传落点，这里按落点命中的文件夹行执行「剪切移动」。
@@ -997,22 +1038,27 @@ const stepForward = useCallback(() => {
           setDropTarget(null);
           return;
         }
-        const dpr = window.devicePixelRatio || 1;
-        // 事件里是物理像素；个别平台按逻辑像素上报，故兜底再试一次原始坐标
-        const hit =
-          rowAtPoint(p.position.x / dpr, p.position.y / dpr) ??
-          rowAtPoint(p.position.x, p.position.y);
-        if (p.type === "over") {
+        // enter/over 作为第二来源（自拖自落时 over 不一定送达，主来源是拖拽中的光标轮询）；
+        // 两者走同一套坐标候选，因此不会互相覆盖出跳变
+        if (p.type === "enter" || p.type === "over") {
+          const scale = winScaleRef.current || window.devicePixelRatio || 1;
+          const hit = hitRowAtCursor(p.position.x, p.position.y, winOriginRef.current, scale);
           const next = hit?.isDir ? hit.path : null;
           setDropTarget((cur) => (cur === next ? cur : next));
           return;
         }
-        // drop
+        if (p.type !== "drop") return;
         setDropTarget(null);
-        if (!hit?.isDir) return;
+        // 兜底：若原生拖拽的 Promise 未能及时结束（例如被外部应用接管），这里也把"拖拽中"收掉
+        setDragging(false);
+        const scale = winScaleRef.current || window.devicePixelRatio || 1;
+        const hit = hitRowAtCursor(p.position.x, p.position.y, winOriginRef.current, scale);
+        // 命中失败时用当前高亮的落点兜底：只要界面上已经提示了目标，松手就应该落到那里
+        const dest = hit?.isDir ? hit.path : dropTargetRef.current;
+        if (!dest) return;
         const internal = p.paths.filter((q) => entriesRef.current.some((en) => en.path === q));
         if (internal.length === 0) return;
-        void moveIntoFolderFrom(hit.path, internal);
+        void moveIntoFolderFrom(dest, internal);
       })
       .then((fn) => {
         if (alive) unlisten = fn;
@@ -1541,9 +1587,27 @@ const stepForward = useCallback(() => {
       // 这样飞书/企微等要求真实文件句柄的外部应用才能接收。
       ev.preventDefault();
       const paths = selected.has(e.path) && selected.size > 1 ? [...selected] : [e.path];
-      startDrag({ item: paths, icon: makeDragIcon(), mode: "copy" }).catch((err) =>
-        console.error("原生拖拽失败:", err)
-      );
+      setDragging(true);
+      void (async () => {
+        // 先取窗口原点与缩放：拖拽中轮询到的光标是物理像素，换算成 CSS 像素需要它们
+        try {
+          const [origin, scale] = await Promise.all([win.innerPosition(), win.scaleFactor()]);
+          winOriginRef.current = { x: origin.x, y: origin.y };
+          winScaleRef.current = scale || 1;
+        } catch {
+          /* 取不到就退回 devicePixelRatio */
+        }
+        // 让"可放置"提示先绘制出来：原生拖拽会接管消息循环，期间未必还能重绘
+        await new Promise((r) => setTimeout(r, 40));
+        try {
+          await startDrag({ item: paths, icon: makeDragIcon(), mode: "copy" });
+        } catch (err) {
+          console.error("原生拖拽失败:", err);
+        } finally {
+          setDragging(false);
+          setDropTarget(null);
+        }
+      })();
     },
     click: (ev, e, idx) => {
       if (ev.shiftKey) {
@@ -2093,7 +2157,9 @@ const stepForward = useCallback(() => {
                     isSelected={selected.has(e.path)}
                     isRenaming={idx === renamingIdx}
                     isDissolving={dissolving.has(e.path)}
+                    isDroppable={dragging && e.is_dir}
                     isDropTarget={dropTarget === e.path}
+                    isAccepted={acceptedPath === e.path}
                     renameRef={renameRef}
                     actions={rowActionsRef}
                   />
@@ -2171,11 +2237,20 @@ const stepForward = useCallback(() => {
         {selected.size > 0 && <span className="vsep" />}
         <span>{folders} 个文件夹 · {files} 个文件</span>
         <span className="spacer" />
-        {/* 底部快捷提示：宽窗显示完整键盘捷径；窄窗收敛为高频句，避免被 55% 裁成断句 */}
-        <span className="hint">
-          <span className="hint-long">单击选中 · ↑↓/Home/End 移动 · Shift 范围多选 · Enter/→ 打开 · Backspace/← 上级 · F2 重命名 · F5 刷新 · 输入字符定位</span>
-          <span className="hint-short">↑↓ 移动 · Shift 多选 · Enter 打开 · ← 上级 · F2 重命名</span>
-        </span>
+        {/* 拖拽中给出明确指引：能拖到哪、松手会发生什么 */}
+        {dragging ? (
+          <span className="hint hint-drag">
+            {dropTarget
+              ? "松手：移动到高亮的文件夹"
+              : "拖到文件夹行即可移动到该文件夹 · 拖出窗口可发送给其它应用"}
+          </span>
+        ) : (
+          /* 底部快捷提示：宽窗显示完整键盘捷径；窄窗收敛为高频句，避免被 55% 裁成断句 */
+          <span className="hint">
+            <span className="hint-long">单击选中 · ↑↓/Home/End 移动 · Shift 范围多选 · Enter/→ 打开 · Backspace/← 上级 · F2 重命名 · F5 刷新 · 输入字符定位</span>
+            <span className="hint-short">↑↓ 移动 · Shift 多选 · Enter 打开 · ← 上级 · F2 重命名</span>
+          </span>
+        )}
       </footer>
 
       {/* 自定义右键菜单 */}
@@ -2389,8 +2464,12 @@ type RowProps = {
   isSelected: boolean;
   isRenaming: boolean;
   isDissolving: boolean;
-  /** 是否正处于内部拖放的落点（文件夹行高亮） */
+  /** 拖拽进行中且本行是文件夹：显示"可放置"提示 */
+  isDroppable: boolean;
+  /** 当前落点（松手即移动到这里） */
   isDropTarget: boolean;
+  /** 刚接收了本次拖放的条目：播一下"已接收"动画 */
+  isAccepted: boolean;
   renameRef: { current: HTMLInputElement | null };
   actions: { current: RowActions };
 };
@@ -2408,7 +2487,9 @@ const Row = memo(function Row({
   isSelected,
   isRenaming,
   isDissolving,
+  isDroppable,
   isDropTarget,
+  isAccepted,
   renameRef,
   actions,
 }: RowProps) {
@@ -2421,7 +2502,7 @@ const Row = memo(function Row({
       // data-row-* 供内部拖放的落点命中使用（见 util.rowAtPoint）
       data-row-path={e.path}
       data-row-is-dir={e.is_dir ? "1" : "0"}
-      className={`row ${isCursor ? "focused" : ""} ${isSelected ? "selected" : ""} ${isDissolving ? "row-dissolving" : ""} ${isDropTarget ? "drop-target" : ""}`}
+      className={`row ${isCursor ? "focused" : ""} ${isSelected ? "selected" : ""} ${isDissolving ? "row-dissolving" : ""} ${isDroppable ? "droppable" : ""} ${isDropTarget ? "drop-target" : ""} ${isAccepted ? "drop-accepted" : ""}`}
       draggable={!isRenaming}
       onDragStart={(ev) => actions.current.dragStart(ev, e)}
       onClick={(ev) => actions.current.click(ev, e, idx)}
@@ -2429,6 +2510,7 @@ const Row = memo(function Row({
       onKeyDown={(ev) => actions.current.keydown(ev)}
       onContextMenu={(ev) => actions.current.contextMenu(ev, e)}
     >
+      {isDropTarget && <span className="drop-badge">松手移入此文件夹</span>}
       <span className="col name">
         <FileGlyph entry={e} />
         {isRenaming ? (

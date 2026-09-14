@@ -175,6 +175,23 @@ export function rowAtPoint(x: number, y: number): { path: string; isDir: boolean
   return { path, isDir: row.dataset.rowIsDir === "1" };
 }
 
+/**
+ * 把光标物理坐标换算成 CSS 像素后命中行。
+ * cursor_position 与拖放事件的坐标基准在平台间不一致（窗口相对 / 屏幕相对），
+ * 因此两种约定都试一次：先按窗口相对，再减去窗口原点按屏幕相对。
+ */
+export function hitRowAtCursor(
+  px: number,
+  py: number,
+  origin: { x: number; y: number },
+  scale: number
+): { path: string; isDir: boolean } | null {
+  return (
+    rowAtPoint(px / scale, py / scale) ??
+    rowAtPoint((px - origin.x) / scale, (py - origin.y) / scale)
+  );
+}
+
 /* ------------------------------ 异步 ------------------------------ */
 
 /** 轮询超时哨兵：网络路径读取在时限内未返回时由 withTimeout 返回 */
