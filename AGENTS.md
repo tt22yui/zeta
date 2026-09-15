@@ -55,11 +55,18 @@
 
 - **前端纯逻辑要抽到 `src/util.ts` 并配 `*.test.ts`**（vitest，`environment: node`，涉及 DOM 的用最小桩对象）：格式化、路径解析、键盘目标判定、超时包装等都不应只存在于组件内部。
 
-- **拖拽分两套机制，别混用**（历史经验，改动前务必先读）：
-  - 应用内拖拽（拖到文件夹行 = 剪切移动）走 **HTML5 拖拽**：`dragstart` 写入私有 MIME（`util.ts` 的 `writeInternalDrag`），文件夹行 `dragover` 里 `preventDefault` + `dropEffect = "move"` 才有落点。好处是逐行高亮同步、浏览器自带边缘自动滚动、光标为 move。
-  - 对外拖拽（给资源管理器/飞书等真实文件句柄）走 **`tauri-plugin-drag` 的原生 OS 拖拽**，由 `Alt` + 拖拽触发，语义是复制。
-  - 因此窗口配置 `dragDropEnabled` 必须为 `false`（Tauri 官方 schema：Windows 上使用 HTML5 拖放必须关闭它），且**两条路径不能合并到同一手势**：原生拖拽是主线程上的模态 OLE/AppKit 循环，会拖慢重绘与 IPC，落到同一手势上就会出现"高亮跟不上"的手感问题。
-  - `dragover`/`dragenter` 阶段浏览器不允许 `getData()`，判定是否为内部拖拽只能用 `types`（`hasInternalDrag`），数据只在 `drop` 阶段读（`readInternalDrag`）。
+- **拖拽：单一手势，按"落在哪"区分功能**（历史经验，改动前务必先读）：
+  - 普通拖拽统一走 **`tauri-plugin-drag` 的原生 OS 拖拽**（对外需要真实文件句柄，HTML5 拖拽给不了）。
+    落在窗口外的文件夹/应用 = 复制给对方；落在列表的文件夹行上 = 应用内移动（`move_into_folder`）。
+  - **不要在 `dragstart` 里 `preventDefault` 之后又指望 HTML5 拖放**：两者会争同一个手势；
+    且原生拖拽是主线程上的模态 OLE/AppKit 循环，周期内的重绘与 IPC 都会被拖慢 ——
+    所以反馈必须尽量"少依赖拖拽中的实时重绘"。
+  - 落点高亮优先用 webview 的 `onDragDropEvent`（`enter`/`over` 是推送式，延迟低）；
+    只有始终收不到 `over` 时才启用低频轮询兜底（见 `App.tsx` 里 300ms 后才挂的 150ms 轮询），
+    并且"可放置"提示要在拖拽开始时就绘制好（`startDrag` 前留一帧），以免模态循环期间来不及重绘。
+  - 窗口配置 `dragDropEnabled` 必须为 `true`，否则收不到 `onDragDropEvent`。
+  - 区分"应用内拖拽"与"从系统拖入"要看路径是否属于当前目录（`entriesRef` 过滤），
+    外部拖入的文件一律不动，避免误改用户文件。
 
 ## 界面与体验约定
 

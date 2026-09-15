@@ -25,8 +25,7 @@ A lightweight, cross-platform desktop file manager. Its core highlight is a **fi
 - **Folder utilities**: dissolve a folder (children move up, empty shell removed) and collect items into a new folder.
 - **Omnibar address bar**: type a path directly (`~` expands to home), with visit history and favorite paths.
 - **Settings panel**: theme (system / light / dark), address-bar history size, restore last path on launch, tag separator.
-- **Drag to external apps**: `Alt` + drag carries real file handles, so dropping into Explorer / Feishu / WeCom works (the external semantics are *copy*).
-- **Drop onto a folder to move**: a plain drag onto a folder row moves the items into it on release. While dragging, every folder row is marked as a valid target and the row under the cursor highlights **instantly** with a "release to move here" badge (native browser drag, with edge auto-scroll); it flashes once the move lands. Name clashes get a numeric suffix so both are kept.
+- **Drag to move, drag out to copy**: one plain drag gesture, decided by *where you release* — on a folder row inside the list it moves the items into that folder (name clashes get a numeric suffix, both kept); outside the window (Explorer / Feishu / WeCom) it copies them over with real file handles. While dragging, every folder row is marked as a valid target, the row under the cursor highlights with a "release to move here" badge, and it flashes once the move lands.
 - **Cross-platform frameless window**: custom title bar with Windows/Linux right-side controls and macOS traffic-light buttons.
 
 ## Tech Stack
