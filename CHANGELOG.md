@@ -2,6 +2,30 @@
 
 本项目的所有重要变更都会记录在此文件中。
 
+## [Unreleased]
+
+### 新特性
+
+- 撤销 / 重做接入界面：`Ctrl+Z` / `Ctrl+Shift+Z`（macOS `⌘`）与工具栏按钮（按可用态置灰），
+  覆盖打标签、重命名、解散/收入文件夹与内部拖拽移动（后端 `History` 栈已就绪）。
+- 删除到回收站：`Delete` 键与右键菜单「删除」项；本地路径进系统回收站（不二次确认），
+  网络（UNC）路径永久删除前二次确认；批量删除显示进度并汇总失败项。删除不进入撤销栈。
+
+### 工程改进
+
+- 后端按模块拆分：`lib.rs` 收敛为入口（插件注册 + 命令表），领域逻辑拆到
+  `tags` / `fs_util` / `history` / `browse` / `file_ops` / `folder_ops` / `preview` / `window`
+  各模块，53 个单元测试就近分布，`lib.rs` 约 1970 行 → 45 行。
+- 前端按组件 + hooks 拆分：`App.tsx` 约 1000 行 → 552 行，视图拆到
+  `components/`（标题栏/工具栏/地址栏/文件表/标签栏/状态栏），逻辑拆到
+  `hooks/`（`useFileBrowser` / `useFileActions` / `useFileList` / `useSettings` /
+  `useSelection` / `useHistory` / `useAddressBar` / `useDragAndDrop`）；
+  面包屑与过滤排序下沉为 `util.ts` 纯函数并补测试。
+
+### 文档
+
+- README（中英）补齐删除与撤销/重做的特性、快捷键与「删除不入撤销栈」说明；更新目录结构；PLAN 标记两项完成。
+
 ## [v0.1.6] - 2026-09-11
 
 ### 新特性

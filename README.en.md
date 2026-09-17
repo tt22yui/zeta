@@ -20,9 +20,11 @@ A lightweight, cross-platform desktop file manager. Its core highlight is a **fi
 - **Full keyboard navigation**: interaction consistent with the system file explorer.
   - Arrow keys to move the selection, `Shift` for range multi-select, `Ctrl` (macOS `⌘`) to move the cursor only
   - `Ctrl+A` select all · `Esc` clear · `Enter` open · `←` parent
-  - `F2` inline rename · `F5` refresh · type characters to jump by name prefix
+  - `F2` inline rename · `F5` refresh · `Delete` move to Trash · `Ctrl+Z` / `Ctrl+Shift+Z` undo / redo
+  - type characters to jump by name prefix
 - **Space preview**: images / video / audio (with spectrum) / PDF / Markdown rich text / text (first 1 MiB); the preview follows the keyboard cursor.
 - **Folder utilities**: dissolve a folder (children move up, empty shell removed) and collect items into a new folder.
+- **Delete & undo/redo**: `Delete` moves items to the OS Trash (network paths are permanently deleted after a confirmation, with batch progress); `Ctrl+Z` / `Ctrl+Shift+Z` undo / redo tagging, renames, folder dissolve/collect and drag-moves. A "Delete" item is also in the context menu, and the toolbar buttons gray out when unavailable.
 - **Omnibar address bar**: type a path directly (`~` expands to home), with visit history and favorite paths.
 - **Settings panel**: theme (system / light / dark), address-bar history size, restore last path on launch, tag separator.
 - **Drag to move, drag out to copy**: one plain drag gesture, decided by *where you release* — on a folder row inside the list it moves the items into that folder (name clashes get a numeric suffix, both kept); outside the window (Explorer / Feishu / WeCom) it copies them over with real file handles. While dragging, every folder row is marked as a valid target, the row under the cursor highlights with a "release to move here" badge, and it flashes once the move lands.
@@ -98,20 +100,29 @@ git push origin --tags
 | `read_text_preview` | Read the first 1 MiB of a text file for the preview pane |
 | `undo` / `redo` / `can_undo` / `can_redo` | Undo-stack operations and queries |
 
-> Note: `undo` / `redo` / `delete_file` are implemented and registered in the backend, but not yet wired into the UI (no `Ctrl+Z` / `Delete` shortcuts or menu items). See [PLAN.md](PLAN.md).
+> Note: deletion goes to the OS Trash and is **not part of the undo stack** (recover it from the Trash yourself); network paths have no Trash and are permanently deleted after a confirmation. Undo/redo only covers renames and folder collect/dissolve/drag-move operations initiated by this app.
 
 ## Project Structure
 
 ```
-├── src/                 # React frontend
-│   ├── App.tsx          # Main view and interactions
-│   ├── api.ts           # Tauri command wrappers (invoke)
-│   ├── types.ts         # Shared types between frontend and backend
-│   └── styles.css       # Global styles
-├── src-tauri/           # Rust backend
-│   ├── src/lib.rs       # Command layer + tag parsing + undo stack
-│   └── tauri.conf.json  # Window and packaging configuration
-└── .github/workflows/   # CI release builds
+├── src/                     # React frontend
+│   ├── App.tsx              # Main view and orchestration
+│   ├── components/          # Title bar / toolbar / address bar / file table / tag sidebar / status bar
+│   ├── hooks/               # Selection, address bar, drag-drop, undo, etc.
+│   ├── api.ts               # Tauri command wrappers (invoke)
+│   ├── types.ts             # Shared types between frontend and backend
+│   └── styles.css           # Global styles
+├── src-tauri/src/           # Rust backend (split by module)
+│   ├── lib.rs               # Entry: plugin registration + command table
+│   ├── tags.rs              # Tag parsing/normalization + separator settings
+│   ├── fs_util.rs           # FS helpers (hidden/system detection, atomic move & rollback)
+│   ├── history.rs           # Undo/redo stack
+│   ├── browse.rs            # Directory listing, drives/home
+│   ├── file_ops.rs          # Add/remove tags, rename, delete
+│   ├── folder_ops.rs        # Dissolve/collect folders, drag-move
+│   ├── preview.rs           # Text preview
+│   └── window.rs            # Startup window setup
+└── .github/workflows/       # CI release builds
 ```
 
 ## License
