@@ -2,6 +2,7 @@
  * 无副作用的纯逻辑工具集：从 App.tsx / PreviewPane.tsx 抽出，便于用 vitest 独立测试。
  * 这里刻意不引入 React 与 Tauri API，保证测试环境（node）可直接 import。
  */
+import type { FileEntry } from "./types";
 
 /** 是否 macOS：影响路径分隔符与快捷键文案 */
 export const isMac = typeof navigator !== "undefined" && /Mac|Macintosh/i.test(navigator.userAgent);
@@ -127,6 +128,107 @@ export function parentOfFor(path: string, mac: boolean): string | null {
 /** 当前平台的上级目录 */
 export function parentOf(path: string): string | null {
   return parentOfFor(path, isMac);
+}
+
+/**
+ * 是否为 UNC（网络共享）路径：`\\server\share` 与 `//server/share` 都算。
+ * 与后端 `is_unc` 对齐：删除时网络路径走永久删除、不进回收站，界面据此二次确认。
+ */
+export function isUncPath(path: string): boolean {
+  return path.startsWith("\\\\") || path.startsWith("//");
+}
+
+/** 面包屑一段：label 展示文本，path 该层级的绝对路径 */
+export type Crumb = { label: string; path: string };
+
+/**
+ * 由当前路径构造面包屑（Windows 盘符 / UNC 共享 / macOS 根目录三类）。
+ * 纯逻辑：mac 作为形参以便两个平台分支都能被单测覆盖。
+ */
+export function buildBreadcrumbs(path: string, mac: boolean): Crumb[] {
+  const crumbs: Crumb[] = [];
+  const sep = mac ? "/" : "\\";
+  const trimmed = path.endsWith(sep) && path.length > sep.length ? path.slice(0, -1) : path;
+  if (!trimmed) {
+    crumbs.push({ label: "/", path: "/" });
+    return crumbs;
+  }
+
+  // Windows UNC 路径（\\server\share\…）：根是共享 \\server\share，再逐级展开
+  if (!mac && trimmed.startsWith("\\\\")) {
+    const m = /^\\\\[^\\]+\\([^\\]+)/.exec(trimmed);
+    if (m) {
+      const rootEnd = m[0];
+      const root = rootEnd.endsWith("\\") ? rootEnd.slice(0, -1) : rootEnd;
+      crumbs.push({ label: root, path: root });
+      const rest = trimmed.slice(root.length).split("\\").filter(Boolean);
+      let acc = root;
+      for (const p of rest) {
+        acc = `${acc}\\${p}`;
+        crumbs.push({ label: p, path: acc });
+      }
+      return crumbs;
+    }
+  }
+
+  // macOS：根为 /，逐级以 / 拼接
+  if (mac) {
+    crumbs.push({ label: "/", path: "/" });
+    const parts = trimmed.split("/").filter(Boolean);
+    let acc = "";
+    for (const p of parts) {
+      acc = `${acc}/${p}`;
+      crumbs.push({ label: p, path: acc });
+    }
+    return crumbs;
+  }
+
+  // Windows 本地盘符路径（C:\…）
+  const parts = trimmed.split("\\").filter(Boolean);
+  let acc = "";
+  parts.forEach((p, i) => {
+    acc = i === 0 ? `${p}\\` : `${acc}${p}\\`;
+    crumbs.push({ label: p, path: acc });
+  });
+  if (!crumbs.length && trimmed.length > 0) {
+    const drive = trimmed.slice(0, 2);
+    if (drive.endsWith(":")) crumbs.push({ label: drive, path: drive + "\\" });
+  }
+  return crumbs;
+}
+
+/* ------------------------------ 文件列表 ------------------------------ */
+
+export type SortKey = "name" | "size" | "modified";
+
+/**
+ * 按搜索词过滤 + 排序：目录始终在文件前；
+ * 名称用 localeCompare（数字感知、忽略大小写），大小/时间按数值。
+ * 纯逻辑：可独立单元测试。
+ */
+export function filterAndSortEntries(
+  entries: FileEntry[],
+  query: string,
+  sortKey: SortKey,
+  sortDesc: boolean
+): FileEntry[] {
+  let list = entries;
+  const q = query.trim().toLowerCase();
+  if (q) list = list.filter((e) => e.name.toLowerCase().includes(q));
+
+  return [...list].sort((a, b) => {
+    // 目录始终排在文件前
+    if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+    let r: number;
+    if (sortKey === "name") {
+      r = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+    } else if (sortKey === "size") {
+      r = a.size - b.size;
+    } else {
+      r = a.modified - b.modified;
+    }
+    return sortDesc ? -r : r;
+  });
 }
 
 /** 目录 + 相对路径拼接为系统风格绝对路径 */

@@ -1,14 +1,18 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
+import type { FileEntry } from "./types";
 import {
   TIMEOUT,
+  buildBreadcrumbs,
   dirnameOf,
   escapeHtml,
   extStyle,
+  filterAndSortEntries,
   formatDate,
   formatSize,
   hitRowAtCursor,
   isEditableTarget,
   isInteractiveTarget,
+  isUncPath,
   joinPath,
   parentOfFor,
   rowAtPoint,
@@ -230,6 +234,107 @@ describe("rowAtPoint（内部拖放落点命中）", () => {
       elementFromPoint: () => null,
     };
     expect(hitRowAtCursor(10, 20, { x: 0, y: 0 }, 1)).toBeNull();
+  });
+});
+
+describe("buildBreadcrumbs", () => {
+  it("Windows 盘符路径逐级展开，盘符段带反斜杠", () => {
+    expect(buildBreadcrumbs("C:\\Users\\me", false)).toEqual([
+      { label: "C:", path: "C:\\" },
+      { label: "Users", path: "C:\\Users\\" },
+      { label: "me", path: "C:\\Users\\me\\" },
+    ]);
+  });
+
+  it("Windows UNC 以共享为根，不把主机名当一级", () => {
+    expect(buildBreadcrumbs("\\\\server\\share\\sub", false)).toEqual([
+      { label: "\\\\server\\share", path: "\\\\server\\share" },
+      { label: "sub", path: "\\\\server\\share\\sub" },
+    ]);
+  });
+
+  it("macOS 以 / 为根逐级拼接", () => {
+    expect(buildBreadcrumbs("/Users/me", true)).toEqual([
+      { label: "/", path: "/" },
+      { label: "Users", path: "/Users" },
+      { label: "me", path: "/Users/me" },
+    ]);
+  });
+
+  it("空路径回退为根", () => {
+    expect(buildBreadcrumbs("", false)).toEqual([{ label: "/", path: "/" }]);
+  });
+});
+
+describe("filterAndSortEntries", () => {
+  function fe(name: string, isDir: boolean, size: number, modified: number): FileEntry {
+    return {
+      name,
+      path: `C:\\tmp\\${name}`,
+      is_dir: isDir,
+      is_hidden: false,
+      ext: name.includes(".") ? name.split(".").pop()! : "",
+      base: name,
+      tags: [],
+      size,
+      modified,
+    };
+  }
+
+  const b = fe("b.txt", false, 20, 200);
+  const a = fe("a.txt", false, 10, 100);
+  const dir = fe("zdir", true, 0, 50);
+  const list = [b, a, dir];
+
+  it("目录始终排在文件前，名称按升序", () => {
+    expect(filterAndSortEntries(list, "", "name", false).map((e) => e.name)).toEqual([
+      "zdir",
+      "a.txt",
+      "b.txt",
+    ]);
+  });
+
+  it("名称排序忽略大小写并数字感知", () => {
+    const items = [fe("file10.txt", false, 0, 0), fe("file2.txt", false, 0, 0)];
+    expect(filterAndSortEntries(items, "", "name", false).map((e) => e.name)).toEqual([
+      "file2.txt",
+      "file10.txt",
+    ]);
+  });
+
+  it("大小/时间排序：降序反转，目录仍在前", () => {
+    expect(filterAndSortEntries(list, "", "size", true).map((e) => e.name)).toEqual([
+      "zdir",
+      "b.txt",
+      "a.txt",
+    ]);
+    expect(filterAndSortEntries(list, "", "modified", false).map((e) => e.name)).toEqual([
+      "zdir",
+      "a.txt",
+      "b.txt",
+    ]);
+  });
+
+  it("按名称子串过滤（大小写不敏感），不改变原数组", () => {
+    const before = list.slice();
+    expect(filterAndSortEntries(list, "A.TXT", "name", false).map((e) => e.name)).toEqual([
+      "a.txt",
+    ]);
+    expect(list).toEqual(before);
+  });
+});
+
+describe("isUncPath", () => {
+  it("识别反斜杠与正斜杠两种 UNC 写法", () => {
+    expect(isUncPath("\\\\server\\share")).toBe(true);
+    expect(isUncPath("//server/share/file.txt")).toBe(true);
+  });
+
+  it("本地路径与相对路径不算 UNC", () => {
+    expect(isUncPath("C:\\Users\\me")).toBe(false);
+    expect(isUncPath("/Users/me")).toBe(false);
+    expect(isUncPath("\\\\")).toBe(true); // 仅前缀也算（与后端 is_unc 一致）
+    expect(isUncPath("")).toBe(false);
   });
 });
 

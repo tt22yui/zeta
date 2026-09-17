@@ -1,1553 +1,209 @@
-import {
-  memo,
-  useCallback,
-  useDeferredValue,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import type {
-  DragEvent as ReactDragEvent,
-  KeyboardEvent as ReactKeyboardEvent,
-  MouseEvent as ReactMouseEvent,
-} from "react";
-import { flushSync } from "react-dom";
-import { getCurrentWindow, cursorPosition } from "@tauri-apps/api/window";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { getVersion } from "@tauri-apps/api/app";
-import { watchImmediate } from "@tauri-apps/plugin-fs";
-import { startDrag } from "@crabnebula/tauri-plugin-drag";
-import {
-  addTag,
-  collectIntoFolder,
-  copyText,
-  dissolveFolder,
-  getDefaultDir,
-  getDrives,
-  getHomeDir,
-  listDir,
-  listSubdirs,
-  moveIntoFolder,
-  openInDefault,
-  removeTag,
-  renameFile,
-  setTagSeparator,
-} from "./api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FileEntry } from "./types";
-import {
-  IconArrowLeft,
-  IconArrowRight,
-  IconArrowUp,
-  IconBookmark,
-  IconClose,
-  IconCopy,
-  IconFolder,
-  IconGlobe,
-  IconMaximize,
-  IconOpenExternal,
-  IconMinus,
-  IconRedo,
-  IconRestore,
-  IconSearch,
-  IconSettings,
-  IconSortArrow,
-  IconStar,
-  IconTag,
-} from "./icons";
+import type { RowActions } from "./FileRow";
+import { ContextMenu } from "./ContextMenu";
+import { IconClose, IconSearch, IconSettings } from "./icons";
+import { useNotice } from "./useNotice";
 import PreviewPane from "./PreviewPane";
 import { ConfirmDialog, PromptDialog } from "./Dialog";
 import { SettingsDialog } from "./SettingsDialog";
-import {
-  applyTheme,
-  loadSettings,
-  saveSettings,
-  watchSystemTheme,
-} from "./settings";
-import type { Settings } from "./settings";
-import {
-  TIMEOUT,
-  extStyle,
-  formatDate,
-  formatSize,
-  hitRowAtCursor,
-  isEditableTarget,
-  isInteractiveTarget,
-  isMac,
-  parentOf,
-  tagColor,
-  withTimeout,
-} from "./util";
-
-const win = getCurrentWindow();
-
-/** 统一轻提示：severity 决定左侧语义色条与是否自动消失（error 常驻手动关闭） */
-type NoticeSeverity = "info" | "success" | "warning" | "error";
-type Notice = { id: number; severity: NoticeSeverity; msg: string } | null;
-
-/**
- * 拖拽影像（canvas）：多选时在右下角标出「N 项」。
- * 一份画布同时服务两条路径：HTML5 拖拽用 setDragImage 直接传 canvas，
- * Alt+拖拽（外部复制）则取 toDataURL 交给原生插件的 icon。
- * 按数量缓存，避免每次拖拽重复绘制。
- */
-const DRAG_ICONS = new Map<number, HTMLCanvasElement>();
-function makeDragCanvas(count: number): HTMLCanvasElement {
-  const cached = DRAG_ICONS.get(count);
-  if (cached) return cached;
-  const c = document.createElement("canvas");
-  c.width = 72;
-  c.height = 72;
-  const ctx = c.getContext("2d");
-  if (ctx) {
-    ctx.clearRect(0, 0, 72, 72);
-    // 底层两页淡色，示意多文件
-    ctx.fillStyle = "rgba(120,124,150,0.5)";
-    ctx.beginPath();
-    ctx.roundRect(15, 27, 40, 38, 6);
-    ctx.fill();
-    ctx.fillStyle = "rgba(168,172,196,0.75)";
-    ctx.beginPath();
-    ctx.roundRect(13, 16, 40, 38, 6);
-    ctx.fill();
-    // 首页白底
-    ctx.fillStyle = "#ffffff";
-    ctx.beginPath();
-    ctx.roundRect(11, 5, 40, 38, 6);
-    ctx.fill();
-    ctx.strokeStyle = "rgba(96,100,128,0.85)";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.roundRect(11, 5, 40, 38, 6);
-    ctx.stroke();
-    // 内容示意线
-    ctx.strokeStyle = "rgba(150,154,180,0.9)";
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(19, 17);
-    ctx.lineTo(43, 17);
-    ctx.moveTo(19, 27);
-    ctx.lineTo(39, 27);
-    ctx.moveTo(19, 35);
-    ctx.lineTo(39, 35);
-    ctx.stroke();
-    // 多选时标出数量，拖拽影像里就能看出"拖了几项"
-    if (count > 1) {
-      const label = count > 99 ? "99+" : String(count);
-      ctx.font = "600 15px system-ui, -apple-system, 'Segoe UI', sans-serif";
-      const w = ctx.measureText(label).width + 14;
-      ctx.fillStyle = "#5b5be0";
-      ctx.beginPath();
-      ctx.roundRect(72 - w - 2, 72 - 24, w, 22, 11);
-      ctx.fill();
-      ctx.fillStyle = "#ffffff";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(label, 72 - w / 2 - 2, 72 - 13);
-    }
-  }
-  if (DRAG_ICONS.size >= 32) DRAG_ICONS.clear(); // 防御无界增长
-  DRAG_ICONS.set(count, c);
-  return c;
-}
-
+import { isEditableTarget, isInteractiveTarget, isMac, parentOf } from "./util";
+import { TitleBar } from "./components/TitleBar";
+import { Toolbar } from "./components/Toolbar";
+import { AddressBar } from "./components/AddressBar";
+import { FileTable } from "./components/FileTable";
+import { TagSidebar } from "./components/TagSidebar";
+import { StatusBar } from "./components/StatusBar";
+import { useWindowState } from "./hooks/useWindowState";
+import { useSettings } from "./hooks/useSettings";
+import { useFileBrowser } from "./hooks/useFileBrowser";
+import { useFileList } from "./hooks/useFileList";
+import { useHistory } from "./hooks/useHistory";
+import { useSelection } from "./hooks/useSelection";
+import { useAddressBar } from "./hooks/useAddressBar";
+import { useDragAndDrop } from "./hooks/useDragAndDrop";
+import { useFileActions } from "./hooks/useFileActions";
 
 export default function App() {
-  const [path, setPath] = useState("");
-  const [entries, setEntries] = useState<FileEntry[]>([]);
-  const [drives, setDrives] = useState<string[]>([]);
-  const [addrEdit, setAddrEdit] = useState(false);
-  const [addrValue, setAddrValue] = useState("");
-  const [hist, setHist] = useState<string[]>([]);
-  const [histIdx, setHistIdx] = useState(-1);
-  // 地址栏历史：已成功进入过的目录（去重、最近优先、持久化）
-  const [addrHist, setAddrHist] = useState<string[]>(() => {
-    try {
-      const raw = JSON.parse(localStorage.getItem("zeta.addrHist") ?? "[]");
-      // localStorage 可能被外部写坏（非数组或混入非字符串），这里兜底过滤，
-      // 否则后续 addrHist.map 会直接抛错崩掉整个界面（对比 favorites 的处理）
-      return Array.isArray(raw) ? raw.filter((p): p is string => typeof p === "string") : [];
-    } catch {
-      return [];
-    }
-  });
-  const [histOpen, setHistOpen] = useState(false);
-  // 面包屑子目录下拉：{path 对应层级, 定位坐标, 子文件夹列表}
-  const [crumbMenu, setCrumbMenu] = useState<{
-    path: string;
-    left: number;
-    top: number;
-    items: string[];
-  } | null>(null);
-  // 历史下拉键盘焦点下标
-  const [histFocus, setHistFocus] = useState(-1);
-  const histPanelRef = useRef<HTMLDivElement | null>(null);
-  const histItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
-  const crumbCloseTimer = useRef<number>();
-  // 盘符下拉
-  const [driveOpen, setDriveOpen] = useState(false);
-  const driveWrapRef = useRef<HTMLDivElement | null>(null);
-  // 收藏路径：持久化到 localStorage，最近加入置顶
-  const [favorites, setFavorites] = useState<string[]>(() => {
-    try {
-      const raw = JSON.parse(localStorage.getItem("zeta.favorites") ?? "[]");
-      return Array.isArray(raw) ? raw.filter((p): p is string => typeof p === "string") : [];
-    } catch {
-      return [];
-    }
-  });
-  const [favOpen, setFavOpen] = useState(false);
-  const favWrapRef = useRef<HTMLDivElement | null>(null);
-  const [loading, setLoading] = useState(false);
   // 统一轻提示：单一底部 Toaster（info/success/warning 自动消失，error 常驻可手动关闭）
-  const [notice, setNotice] = useState<Notice>(null);
-  const noticeTimer = useRef<number>();
-  const noticeIdRef = useRef(0);
-  const clearNotice = useCallback(() => {
-    window.clearTimeout(noticeTimer.current);
-    setNotice(null);
-  }, []);
-  const showNotice = useCallback((severity: NoticeSeverity, msg: string) => {
-    const id = ++noticeIdRef.current;
-    setNotice({ id, severity, msg });
-    window.clearTimeout(noticeTimer.current);
-    if (severity !== "error") {
-      const dur = severity === "warning" ? 3500 : 2000;
-      noticeTimer.current = window.setTimeout(() => {
-        setNotice((cur) => (cur && cur.id === id ? null : cur));
-      }, dur);
-    }
-  }, []);
-  /** 复制到剪贴板并反馈失败：调用点分散在快捷键与右键菜单，统一封装避免静默失败 */
-  const copyWithNotice = useCallback(
-    (text: string, what: string) => {
-      void copyText(text).catch((e) => showNotice("error", `复制${what}失败：${e}`));
-    },
-    [showNotice]
-  );
-  // 集中式弹窗编排：null=不弹；kind="confirm" 确认框 / "prompt" 输入框（替代原生 confirm/prompt）
-  const [dialog, setDialog] = useState<
-    | { kind: "confirm"; title: string; message: string; danger?: boolean; confirmLabel?: string; action: () => void }
-    | { kind: "prompt"; title: string; label: string; defaultValue?: string; action: (value: string) => void }
-    | null
-  >(null);
+  const { notice, clearNotice, showNotice, copyWithNotice } = useNotice();
+  // 窗口最大化状态与运行时版本号
+  const { isMax, appVersion } = useWindowState();
+  // 设置：单键 JSON（zeta.settings）持久化，集中管理
+  const { settings, updateSettings, settingsOpen, setSettingsOpen } = useSettings();
 
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  // selected 的同步镜像：reload 需要「重载前的选中集」才能在重载后恢复选中，
-  // 但若直接依赖 selected，每次点击/框选都会换掉 reload 的身份，进而重建文件监听与 UNC 轮询。
-  const selectedRef = useRef(selected);
-  selectedRef.current = selected;
-  // 当前目录条目的同步镜像：drop 事件回调里要判断"落下的路径是否属于本目录"
-  // （属于 = 应用内拖拽 → 移动；不属于 = 从系统拖入的外部文件 → 不动），
-  // 用 ref 读取可避免把 entries 放进监听依赖里反复重注册。
-  const entriesRef = useRef<FileEntry[]>([]);
-  entriesRef.current = entries;
-  // 内部拖放：当前被悬停命中的文件夹行路径（用于落点高亮）
-  const [dropTarget, setDropTarget] = useState<string | null>(null);
-  // 是否正在拖拽：用于展示"可放置"提示与状态栏指引
-  const [dragging, setDragging] = useState(false);
-  // 刚落下的目标文件夹行路径：给它一个短暂的"已接收"动画
-  const [acceptedPath, setAcceptedPath] = useState<string | null>(null);
-  // 窗口原点（物理像素）与缩放：把拖放事件/光标坐标换算成 CSS 像素需要
-  const winOriginRef = useRef({ x: 0, y: 0 });
-  const winScaleRef = useRef(1);
-  // drop 回调里用最新落点兜底（监听闭包的注册时机早于状态更新）
-  const dropTargetRef = useRef<string | null>(null);
-  dropTargetRef.current = dropTarget;
-  // 本轮拖拽是否收到过 over 事件：决定要不要启用低频轮询兜底
-  const sawOverRef = useRef(false);
-  const draggingRef = useRef(false);
-  draggingRef.current = dragging;
   const [search, setSearch] = useState("");
-  // 搜索输入即时回显，但对大目录的过滤+排序（visibleEntries）走延迟值，
-  // 避免每敲一个字符都同步阻塞在主线程上重排全表。
-  const deferredSearch = useDeferredValue(search);
-  const [tagInput, setTagInput] = useState("");
-  const [isMax, setIsMax] = useState(false);
-  // 排序：key 为字段（name/size/modified），desc 为升序/降序
-  const [sortKey, setSortKey] = useState<"name" | "size" | "modified">("name");
-  const [sortDesc, setSortDesc] = useState(false);
-  // 自定义右键菜单：{x,y} 弹出坐标，paths 为操作目标，single 为右键命中的单行条目
-  const [ctxMenu, setCtxMenu] = useState<{
-    x: number;
-    y: number;
-    paths: string[];
-    single: FileEntry | null;
-    allDirs: boolean;
-  } | null>(null);
+  // 选中提升到 App：加载目录要清空、reload 要恢复，提升后可避免「导航 ↔ 选中」循环依赖
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [cursor, setCursor] = useState(-1);
+  // selected 的同步镜像：reload 读取「重载前的选中集」，但不放进依赖（避免重建文件监听）
+  const selectedRef = useRef<Set<string>>(new Set());
+  selectedRef.current = selected;
   // 空格预览面板：当前预览的文件路径；null 表示面板关闭
   const [previewPath, setPreviewPath] = useState<string | null>(null);
-  // 设置：单键 JSON（zeta.settings）持久化，集中管理
-  const [settings, setSettings] = useState<Settings>(loadSettings);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-
-  // 键盘导航：光标行下标（列表内 roving tabindex）+ 行 DOM 引用
-  const [cursor, setCursor] = useState(-1);
-  const rowRefs = useRef<(HTMLDivElement | null)[]>([]);
-  // Shift 范围多选的锚点行下标
-  const anchor = useRef(-1);
-  // 记录「从哪个父目录进入了哪个子目录」，返回上级时据此恢复光标停留
-  const lastEnterRef = useRef<{ parent: string; childPath: string } | null>(null);
-  // 前进重入栈：记录「上退时离开的目录」，使 ← 退到任意上层后 → 仍能跨层重入
-  const fwdRef = useRef<string[]>([]);
-  // 待聚焦的子目录项，列表加载到位后将其设为光标与选中（用于返回上级后恢复）
-  const [pendingFocus, setPendingFocus] = useState<string | null>(null);
+  // 记录本应用发起的文件操作时间点：随后较短窗口内的 watch 自动刷新会被跳过
+  const selfOpAt = useRef(0);
+  // 当前目录条目的同步镜像：drop 事件回调里判断"落下的路径是否属于本目录"
+  const entriesRef = useRef<FileEntry[]>([]);
   // 列表滚动容器（用于 PageUp/PageDown 翻页步长）
   const bodyRef = useRef<HTMLDivElement | null>(null);
-  // 类型定位（打字跳转）缓冲
-  const typeBuf = useRef("");
-  const typeTimer = useRef<number>();
-  // 行内重命名（输入值由输入框自身持有，不再放 state）
-  const [renamingIdx, setRenamingIdx] = useState<number | null>(null);
-  const renameRef = useRef<HTMLInputElement | null>(null);
-  // 运行时版本号（标题栏用）
-  const [appVersion, setAppVersion] = useState("");
-  const addrRef = useRef<HTMLInputElement | null>(null);
-  // 打标签输入框（清空按钮后需恢复焦点）
-  const tagInputRef = useRef<HTMLInputElement | null>(null);
-  // 地址栏容器（用于点击外部关闭历史下拉）
-  const addrWrapRef = useRef<HTMLDivElement | null>(null);
-  // 长路径自适应省略：面包屑栏实际渲染容器
-  const crumbbarRef = useRef<HTMLDivElement | null>(null);
-  // 保存最后一栏到最右端的面包屑段数（0 表示全部展示，>0 表示超出省略中间）
-  const [keepTail, setKeepTail] = useState(-1);
-  const lastPathRef = useRef<string>("");
-  const renameCommitted = useRef(false);
-  // 记录本应用发起的文件操作时间点：随后较短窗口内的 watch 自动刷新会被跳过，
-  // 避免"操作后显式 reload + watch 防抖 reload"造成的重复加载闪烁。
-  const selfOpAt = useRef(0);
-  // 解散文件夹动画：正在收缩淡出的行路径集合（动画结束才真正执行解散）
-  const [dissolving, setDissolving] = useState<Set<string>>(new Set());
-  // 弹层 / 对话框 / 地址栏编辑中：此时全局导航键（裸 ←→）不应改动背后的列表。
-  // 用 ref 同步而非放进依赖，避免这些开关一变动就重挂 window 监听。
+  // 弹层 / 对话框 / 地址栏编辑中：全局导航键（裸 ←→）不应改动背后的列表
   const popupOpenRef = useRef(false);
-  popupOpenRef.current = !!(
-    histOpen ||
-    crumbMenu ||
-    driveOpen ||
-    favOpen ||
-    ctxMenu ||
-    dialog ||
-    settingsOpen ||
-    addrEdit
-  );
 
-  // 卸载时清掉所有延时器：否则卸载后回调仍会触发 setState（并可能改动已卸载组件的状态）
-  useEffect(
-    () => () => {
-      window.clearTimeout(typeTimer.current);
-      window.clearTimeout(noticeTimer.current);
-      window.clearTimeout(crumbCloseTimer.current);
+  // 目录浏览与导航
+  const {
+    path,
+    entries,
+    drives,
+    hist,
+    histIdx,
+    loading,
+    currentDrive,
+    navigate,
+    goBack,
+    goForward,
+    goUp,
+    stepForward,
+    reload,
+    openItem,
+    pendingFocus,
+    setPendingFocus,
+  } = useFileBrowser({
+    restoreLastPath: settings.restoreLastPath,
+    showNotice,
+    clearNotice,
+    setSearch,
+    setSelected,
+    setCursor,
+    selectedRef,
+    selfOpAt,
+  });
+  entriesRef.current = entries;
+
+  // 撤销/重做：可用态 + 动作
+  const {
+    canUndo,
+    canRedo,
+    refresh: refreshHistory,
+    undo: doUndo,
+    redo: doRedo,
+  } = useHistory({ reload, showNotice, selfOpAt });
+
+  // 应用内变更后：reload 再刷新撤销/重做可用态。watch/轮询仍用原始 reload，避免频繁 IPC。
+  const reloadAfterMutation = useCallback(
+    async (opts: { noErrorUi?: boolean } = {}) => {
+      const r = await reload(opts);
+      await refreshHistory();
+      return r;
     },
-    []
+    [reload, refreshHistory]
   );
 
-  // 窗口以 visible:false 启动，React 首帧提交后立即显示，避免白屏/跳动。
-  // 注意不能用 requestAnimationFrame：隐藏窗口时 rAF 被暂停，show 不会触发
-  // （后端另有 5 秒 fail-safe 兜底，见 lib.rs setup）。
-  useEffect(() => {
-    void win.show();
-  }, []);
-
-  // 读取运行时版本号，展示在标题栏品牌标识右侧
-  useEffect(() => {
-    getVersion()
-      .then(setAppVersion)
-      .catch(() => {});
-  }, []);
-
-  // 进入行内重命名时聚焦并全选
-  useEffect(() => {
-    if (renamingIdx != null) {
-      renameRef.current?.focus();
-      renameRef.current?.select();
-    }
-  }, [renamingIdx]);
-
-  // 窗口最大化状态监听（用于切换 ”最大化/还原“ 图标）
-  useEffect(() => {
-    let mounted = true;
-    win
-      .isMaximized()
-      .then((m) => mounted && setIsMax(m))
-      .catch(() => {});
-    const unlisten = win.onResized(() => {
-      win.isMaximized().then((m) => mounted && setIsMax(m)).catch(() => {});
-    });
-    return () => {
-      mounted = false;
-      unlisten.then((f) => f && f()).catch(() => {});
-    };
-  }, []);
-
-  /**
-   * 加载目录。返回最终成功进入的 { path, list }；彻底失败（回退链全不可用）返回 null。
-   * 路径不存在时自动回退：先父目录，再默认目录（静默递归，避免层层闪烁）。
-   * silent：后台静默刷新（轮询/自动刷新/F5），不切换 loading 态。
-   * noErrorUi：不主动设置错误提示，交由调用方（轮询超时限噪）处理。
-   */
-  const loadDir = useCallback(
-    async (
-      dir: string,
-      opts: { silent?: boolean; noErrorUi?: boolean } = {}
-    ): Promise<{ path: string; list: FileEntry[] } | null> => {
-      const { silent = false, noErrorUi = false } = opts;
-      if (!silent) setLoading(true);
-      if (!noErrorUi) clearNotice();
-      try {
-        const list = await listDir(dir);
-        setEntries(list);
-        setPath(dir);
-        setSelected(new Set());
-        setCursor(-1);
-        // 记住最后访问的路径，下次启动恢复
-        try {
-          window.localStorage.setItem("zeta.lastPath", dir);
-        } catch {
-          /* 存储不可用时忽略 */
-        }
-        return { path: dir, list };
-      } catch (e) {
-        if (!noErrorUi) showNotice("error", String(e));
-        // 路径失效回退：父目录可用则进入父目录，否则退回默认目录
-        const parent = parentOf(dir);
-        if (parent && parent !== dir) {
-          const r = await loadDir(parent, { silent: true, noErrorUi });
-          if (r) {
-            showNotice("warning", `路径不存在，已回退到 ${parent}`);
-            return r;
-          }
-        }
-        try {
-          const def = await getDefaultDir();
-          if (def && def !== dir) {
-            const r = await loadDir(def, { silent: true, noErrorUi });
-            if (r) {
-              showNotice("warning", "路径不存在，已回退到默认目录");
-              return r;
-            }
-          }
-        } catch {
-          /* 默认目录不可得时忽略 */
-        }
-        return null;
-      } finally {
-        if (!silent) setLoading(false);
-      }
-    },
-    [clearNotice, showNotice]
+  // 列表视图派生：搜索过滤 / 排序 / 标签计数 / 统计
+  const { sortKey, sortDesc, applySort, visibleEntries, tagCounts, folders, files } = useFileList(
+    entries,
+    search
   );
 
-  // 记录访问历史：path 变化时置顶去重，最多保留 settings.addrHistLimit 条，持久化到 localStorage
-  useEffect(() => {
-    if (!path) return;
-    setAddrHist((prev) => {
-      const next = [path, ...prev.filter((p) => p !== path)].slice(0, settings.addrHistLimit);
-      try {
-        localStorage.setItem("zeta.addrHist", JSON.stringify(next));
-      } catch {
-        /* 忽略 */
-      }
-      return next;
-    });
-  }, [path, settings.addrHistLimit]);
-
-  useEffect(() => {
-    // 启动早期后端/IPC 可能尚未就绪，get_drives 失败会让盘符下拉永久为空，故失败自动重试；
-    // 但「成功返回空」是有效答案（macOS 本就没有盘符），不能再重试 —— 否则白等 3 秒并多发 5 次 IPC
-    let stop = false;
-    const loadDrives = async () => {
-      for (let i = 0; i < 6; i++) {
-        try {
-          const d = await getDrives();
-          if (!stop) setDrives(d);
-          return;
-        } catch {
-          /* 后端未就绪，稍后重试 */
-        }
-        if (i < 5) await new Promise((r) => setTimeout(r, 500));
-      }
-    };
-    void loadDrives();
-    // 优先恢复上次访问的路径（受设置开关控制），否则回到默认目录
-    let remembered: string | null = null;
-    if (settings.restoreLastPath) {
-      try {
-        remembered = window.localStorage.getItem("zeta.lastPath");
-      } catch {
-        /* 存储不可用时忽略 */
-      }
-    }
-    const start = (dir: string) => {
-      void loadDir(dir).then((r) => {
-        // 以实际停留路径入栈（失效回退时记录回退后的目录）
-        setHist(r ? [r.path] : []);
-        setHistIdx(r ? 0 : -1);
-      });
-    };
-    if (remembered) {
-      start(remembered);
-    } else {
-      getDefaultDir().then(start);
-    }
-    // 卸载或依赖变化时置位，避免旧一轮的异步续体在失效后继续 setDrives
-    return () => {
-      stop = true;
-    };
-  }, [loadDir, settings.restoreLastPath]);
-
-  // 主题落地 + system 模式跟随系统深浅色变化
-  useEffect(() => {
-    applyTheme(settings.theme);
-    const unsub = watchSystemTheme(() => {
-      if (settings.theme === "system") applyTheme("system");
-    });
-    return unsub;
-  }, [settings.theme]);
-
-  // 启动与变更时把标签分隔符同步到后端内存态（持久化由 zeta.settings 负责）
-  useEffect(() => {
-    void setTagSeparator(settings.tagSeparator).catch(() => {});
-  }, [settings.tagSeparator]);
-
-  const updateSettings = useCallback((patch: Partial<Settings>) => {
-    setSettings((prev) => {
-      const next = { ...prev, ...patch };
-      saveSettings(next);
-      return next;
-    });
-  }, []);
-
-  const navigate = useCallback(
-    async (dir: string, opts: { keepForward?: boolean } = {}) => {
-      setSearch("");
-      // 前进重入栈只在「上退 / 前进重入」链上保留；分支到别处（面包屑/历史/进入新目录）即清空
-      if (!opts.keepForward) fwdRef.current = [];
-      // 先加载，成功后按「实际停留路径」入栈（失效回退时记录父目录，避免历史残留失效路径）
-      const result = await loadDir(dir);
-      if (!result) return;
-      const next = hist.slice(0, histIdx + 1);
-      next.push(result.path);
-      setHist(next);
-      setHistIdx(next.length - 1);
-      // 若这次是「回到最近一次进入过的父目录」，返回上级后把光标恢复在该子目录上
-      const enter = lastEnterRef.current;
-      if (enter && result.path === enter.parent) {
-        setPendingFocus(enter.childPath);
-        lastEnterRef.current = null;
-      }
-    },
-    [hist, histIdx, loadDir]
-  );
-
-  const goBack = useCallback(async () => {
-    if (histIdx <= 0) return;
-    fwdRef.current = []; // 历史后退属分支跳转，前进重入栈作废
-    const idx = histIdx - 1;
-    setSearch("");
-    const result = await loadDir(hist[idx]);
-    if (!result) return; // 该历史项及其回退均失效：停留在当前视图
-    if (result.path !== hist[idx]) {
-      setHist((prev) => prev.map((p, i) => (i === idx ? result.path : p)));
-    }
-    setHistIdx(idx);
-  }, [hist, histIdx, loadDir]);
-
-  const goForward = useCallback(async () => {
-    if (histIdx >= hist.length - 1) return;
-    fwdRef.current = []; // 历史前进属分支跳转，前进重入栈作废
-    const idx = histIdx + 1;
-    setSearch("");
-    const result = await loadDir(hist[idx]);
-    if (!result) return;
-    if (result.path !== hist[idx]) {
-      setHist((prev) => prev.map((p, i) => (i === idx ? result.path : p)));
-    }
-    setHistIdx(idx);
-  }, [hist, histIdx, loadDir]);
-
-  const goUp = useCallback(async () => {
-  const parent = parentOf(path);
-  if (parent && parent !== path) {
-    // 上退：记录被离开的目录，供跨层 → 重入
-    fwdRef.current.push(path);
-    await navigate(parent, { keepForward: true });
-  }
-}, [path, navigate]);
-
-/** 前进重入：无聚焦行时按上退栈重入最近离开的目录（跨层对称） */
-const stepForward = useCallback(() => {
-  const target = fwdRef.current.pop();
-  if (target) void navigate(target, { keepForward: true });
-}, [navigate]);
-
-  /** 地址栏进入编辑态：回填当前路径并聚焦 */
-  const beginAddrEdit = useCallback(() => {
-    setAddrValue(path);
-    setAddrEdit(true);
-  }, [path]);
-
-  /** 地址栏提交：空则取消；支持 `~` 展开主目录与 UNC/SMB；否则跳转到输入路径 */
-  const commitAddr = useCallback(() => {
-    const raw = addrValue.trim();
-    setAddrEdit(false);
-    if (!raw || raw === path) return;
-    // `~` 或 `~\...`：展开为用户主目录（按平台分隔符）
-    const hp = isMac ? "~/" : "~\\";
-    if (raw === "~" || raw.startsWith(hp)) {
-      void (async () => {
-        try {
-          const home = (await getHomeDir()).trim().replace(/[\\/]+$/, "");
-          if (!home) return;
-          void navigate(raw === "~" ? home : home + raw.slice(1));
-        } catch {
-          /* 主目录不可得时忽略 */
-        }
-      })();
-      return;
-    }
-    void navigate(raw);
-  }, [addrValue, navigate, path]);
-
-  /** 地址栏取消编辑 */
-  const cancelAddr = useCallback(() => {
-    setAddrEdit(false);
-  }, []);
-
-  /** 面包屑下钻：悬停某段时异步拉取该层级的子文件夹并定位下拉 */
-  const openCrumbMenu = useCallback(
-    async (dir: string, el: HTMLElement) => {
-      window.clearTimeout(crumbCloseTimer.current);
-      const r = el.getBoundingClientRect();
-      const left = Math.max(4, Math.min(r.left, window.innerWidth - 224));
-      let items: string[];
-      try {
-        items = await listSubdirs(dir);
-      } catch {
-        items = [];
-      }
-      setHistOpen(false);
-      setDriveOpen(false);
-      setFavOpen(false);
-      setCrumbMenu({ path: dir, left, top: r.bottom + 4, items });
-    },
-    []
-  );
-
-  const closeCrumbMenuSoon = useCallback(() => {
-    window.clearTimeout(crumbCloseTimer.current);
-    crumbCloseTimer.current = window.setTimeout(() => setCrumbMenu(null), 160);
-  }, []);
-
-  const keepCrumbMenu = useCallback(() => {
-    window.clearTimeout(crumbCloseTimer.current);
-  }, []);
-
-  // 历史下拉键盘导航：↑↓/Home/End 移动、Enter 跳转、Delete 删除、Esc 关闭
-  const histKeyNav = useCallback(
-    (ev: ReactKeyboardEvent) => {
-      const n = addrHist.length;
-      if (n === 0) return;
-      const k = ev.key;
-      if (
-        ["ArrowDown", "ArrowUp", "Home", "End", "Enter", "Delete", "Backspace", "Escape"].includes(k)
-      ) {
-        ev.preventDefault();
-        ev.stopPropagation();
-      }
-      const focus = (i: number) => {
-        setHistFocus(i);
-        histItemRefs.current[i]?.focus({ preventScroll: true });
-      };
-      switch (k) {
-        case "ArrowDown":
-          focus((histFocus + 1 + n) % n);
-          break;
-        case "ArrowUp":
-          focus((histFocus - 1 + n) % n);
-          break;
-        case "Home":
-          focus(0);
-          break;
-        case "End":
-          focus(n - 1);
-          break;
-        case "Enter": {
-          const p = addrHist[histFocus];
-          if (p) {
-            setHistOpen(false);
-            if (p !== path) void navigate(p);
-          }
-          break;
-        }
-        case "Delete":
-        case "Backspace": {
-          const p = addrHist[histFocus];
-          if (p) {
-            setAddrHist((prev) => {
-              const next = prev.filter((x) => x !== p);
-              try {
-                localStorage.setItem("zeta.addrHist", JSON.stringify(next));
-              } catch {
-                /* 忽略 */
-              }
-              return next;
-            });
-            focus(Math.max(0, histFocus - 1));
-          }
-          break;
-        }
-        case "Escape":
-          setHistOpen(false);
-          break;
-      }
-    },
-    [addrHist, histFocus, path, navigate]
-  );
-
-  // 历史下拉打开时把焦点交给面板，方便纯键盘遍历；关闭时复位
-  useEffect(() => {
-    if (histOpen) {
-      setHistFocus(-1);
-      histPanelRef.current?.focus({ preventScroll: true });
-    }
-  }, [histOpen]);
-
-  // 点击面包屑下拉外部或 Esc 时关闭
-  useEffect(() => {
-    if (!crumbMenu) return;
-    const onDoc = (e: MouseEvent) => {
-      if (!addrWrapRef.current?.contains(e.target as Node)) setCrumbMenu(null);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setCrumbMenu(null);
-    };
-    // 延迟到本次按钮事件之后再注册，避免「打开即关闭」；若期间面板已被关闭，
-    // cleanup 必须连这个待执行的回调一起取消，否则监听器会在 cleanup 之后被永久挂上（泄漏并持有过期闭包）
-    const deferAdd = window.setTimeout(() => window.addEventListener("mousedown", onDoc, true), 0);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.clearTimeout(deferAdd);
-      window.removeEventListener("mousedown", onDoc, true);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [crumbMenu]);
-
-  // 点击盘符下拉外部或 Esc 时关闭
-  useEffect(() => {
-    if (!driveOpen) return;
-    const onDoc = (e: MouseEvent) => {
-      if (!driveWrapRef.current?.contains(e.target as Node)) setDriveOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setDriveOpen(false);
-    };
-    const deferAdd = window.setTimeout(() => window.addEventListener("mousedown", onDoc, true), 0);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.clearTimeout(deferAdd);
-      window.removeEventListener("mousedown", onDoc, true);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [driveOpen]);
-
-  // 点击收藏下拉外部或 Esc 时关闭
-  useEffect(() => {
-    if (!favOpen) return;
-    const onDoc = (e: MouseEvent) => {
-      if (!favWrapRef.current?.contains(e.target as Node)) setFavOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setFavOpen(false);
-    };
-    const deferAdd = window.setTimeout(() => window.addEventListener("mousedown", onDoc, true), 0);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.clearTimeout(deferAdd);
-      window.removeEventListener("mousedown", onDoc, true);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [favOpen]);
-
-  const tagCounts = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const e of entries) for (const t of e.tags) m.set(t, (m.get(t) ?? 0) + 1);
-    return [...m.entries()].sort((a, b) => b[1] - a[1]);
-  }, [entries]);
-
-  const visibleEntries = useMemo(() => {
-    let list = entries;
-    const q = deferredSearch.trim().toLowerCase();
-    if (q) list = list.filter((e) => e.name.toLowerCase().includes(q));
-
-    const sorted = [...list].sort((a, b) => {
-      // 目录始终排在文件前
-      if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
-      let r: number;
-      if (sortKey === "name") {
-        r = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
-      } else if (sortKey === "size") {
-        r = a.size - b.size;
-      } else {
-        r = a.modified - b.modified;
-      }
-      return sortDesc ? -r : r;
-    });
-    return sorted;
-  }, [entries, deferredSearch, sortKey, sortDesc]);
-
-  // 空格预览面板当前条目：从 visibleEntries 按 previewPath 派生，
-  // 列表刷新后自动同步到新 entry 对象（路径不变）
+  // 空格预览面板当前条目：从 visibleEntries 按 previewPath 派生，列表刷新后自动同步
   const previewEntry = useMemo(
     () => (previewPath ? visibleEntries.find((e) => e.path === previewPath) ?? null : null),
     [previewPath, visibleEntries]
   );
 
-  const folders = useMemo(() => {
-    let n = 0;
-    for (const e of entries) if (e.is_dir) n++;
-    return n;
-  }, [entries]);
-  const files = entries.length - folders;
+  // 选中与键盘导航
+  const selection = useSelection({
+    selected,
+    setSelected,
+    cursor,
+    setCursor,
+    visibleEntries,
+    pendingFocus,
+    setPendingFocus,
+    openItem,
+    goUp,
+    previewPath,
+    setPreviewPath,
+    copyWithNotice,
+    showNotice,
+    reload: reloadAfterMutation,
+    bodyRef,
+    selfOpAt,
+  });
+  const {
+    rowRefs,
+    focusRow,
+    selectOnly,
+    rowClick,
+    clearSelection,
+    handleRowKeyDown,
+    handleTableKeyDown,
+    handleAppKeyDown,
+    renamingIdx,
+    setRenamingIdx,
+    renameRef,
+    renameCommitted,
+    startRename,
+    commitRename,
+  } = selection;
 
-  // 当前所在的盘符（UNC 路径时无盘符）
-  const currentDrive = drives.find((d) => path.startsWith(d)) ?? null;
+  // 地址栏一族：编辑态、访问历史、面包屑、盘符/收藏下拉
+  const address = useAddressBar({ path, navigate, settings });
+  const { closeAllPopups } = address;
 
-  // 当前路径是否已收藏（地址栏收藏按钮的切换态）
-  const isFavorite = favorites.includes(path);
-  /** 切换收藏：加入（置顶去重）或移除，并持久化 */
-  const toggleFavorite = useCallback((p: string) => {
-    setFavorites((prev) => {
-      const already = prev.includes(p);
-      const next = already ? prev.filter((x) => x !== p) : [p, ...prev].slice(0, 50);
-      try {
-        localStorage.setItem("zeta.favorites", JSON.stringify(next));
-      } catch {
-        /* 忽略 */
-      }
-      return next;
-    });
-  }, []);
+  // 拖放：内部移动 + 对外复制
+  const { dropTarget, dragging, acceptedPath, dragStart } = useDragAndDrop({
+    selected,
+    reload: reloadAfterMutation,
+    entriesRef,
+    selfOpAt,
+    showNotice,
+  });
 
-  /** 切换排序：点同字段反向，切字段时大小/时间默认降序、名称默认升序 */
-  const applySort = useCallback(
-    (k: "name" | "size" | "modified") => {
-      setSortKey(k);
-      if (sortKey === k) setSortDesc((d) => !d);
-      else setSortDesc(k === "size" || k === "modified");
-    },
-    [sortKey]
+  // 文件操作与弹窗编排：打标签、右键菜单、解散/收入文件夹、删除到回收站
+  const {
+    ctxMenu,
+    openCtxMenu,
+    openEmptyCtxMenu,
+    closeCtxMenu,
+    dialog,
+    setDialog,
+    dissolving,
+    applyTagToSelection,
+    applyTagFromSidebar,
+    removeTagFrom,
+    clearAllTags,
+    requestDissolve,
+    requestCollect,
+    requestDelete,
+  } = useFileActions({
+    selected,
+    setSelected,
+    entries,
+    reload: reloadAfterMutation,
+    showNotice,
+    clearNotice,
+    selfOpAt,
+    selectOnly,
+    setCursor,
+    closeAllPopups,
+    path,
+  });
+
+  // 弹层 / 对话框开启时，全局导航键让位
+  popupOpenRef.current = !!(
+    address.histOpen ||
+    address.crumbMenu ||
+    address.driveOpen ||
+    address.favOpen ||
+    ctxMenu ||
+    dialog ||
+    settingsOpen ||
+    address.addrEdit
   );
 
-  const breadcrumbs = useMemo(() => {
-    const crumbs: { label: string; path: string }[] = [];
-    const sep = isMac ? "/" : "\\";
-    const trimmed =
-      path.endsWith(sep) && path.length > sep.length ? path.slice(0, -1) : path;
-    if (!trimmed) {
-      crumbs.push({ label: "/", path: "/" });
-      return crumbs;
-    }
-
-    // Windows UNC 路径（\\server\share\…）：根是共享 \\server\share，再逐级展开
-    if (!isMac && trimmed.startsWith("\\\\")) {
-      const m = /^\\\\[^\\]+\\([^\\]+)/.exec(trimmed);
-      if (m) {
-        const rootEnd = m[0];
-        const root = rootEnd.endsWith("\\") ? rootEnd.slice(0, -1) : rootEnd;
-        crumbs.push({ label: root, path: root });
-        const rest = trimmed.slice(root.length).split("\\").filter(Boolean);
-        let acc = root;
-        for (const p of rest) {
-          acc = `${acc}\\${p}`;
-          crumbs.push({ label: p, path: acc });
-        }
-        return crumbs;
-      }
-    }
-
-    // macOS：根为 /，逐级以 / 拼接
-    if (isMac) {
-      crumbs.push({ label: "/", path: "/" });
-      const parts = trimmed.split("/").filter(Boolean);
-      let acc = "";
-      for (const p of parts) {
-        acc = `${acc}/${p}`;
-        crumbs.push({ label: p, path: acc });
-      }
-      return crumbs;
-    }
-
-    // Windows 本地盘符路径（C:\…）
-    const parts = trimmed.split("\\").filter(Boolean);
-    let acc = "";
-    parts.forEach((p, i) => {
-      acc = i === 0 ? `${p}\\` : `${acc}${p}\\`;
-      crumbs.push({ label: p, path: acc });
-    });
-    if (!crumbs.length && trimmed.length > 0) {
-      const drive = trimmed.slice(0, 2);
-      if (drive.endsWith(":")) crumbs.push({ label: drive, path: drive + "\\" });
-    }
-    return crumbs;
-  }, [path]);
-
-  // 长路径：面包屑自适应省略中间段。路径变化先全量展示，若溢出则逐步减少尾部保留段数，
-  // 直到恰好放得下，保证「当前目录」始终可见且不横向滚动。
-  useLayoutEffect(() => {
-    const el = crumbbarRef.current;
-    if (!el) return;
-    const n = breadcrumbs.length;
-    if (n <= 1) return;
-    if (lastPathRef.current !== path) {
-      lastPathRef.current = path;
-      setKeepTail(-1); // 重新走全量测量
-      return;
-    }
-    if (el.scrollWidth <= el.clientWidth) return; // 当前保留段数已放得下
-    setKeepTail((k) => Math.max(1, (k < 0 ? n - 1 : k) - 1));
-  }, [breadcrumbs, path, keepTail]);
-
-  // 长路径渲染：保留尾部文件夹（含当前目录），过长时从根/左侧省略直至放得下
-  const crumbN = breadcrumbs.length;
-  const crumbK = keepTail < 0 ? crumbN : Math.min(keepTail, crumbN);
-  const crumbStart = Math.max(0, crumbN - crumbK);
-  const crumbShow: ({ label: string; path: string } | null)[] = [];
-  if (crumbN > 0) {
-    if (crumbStart > 0) crumbShow.push(null); // 左侧省略：被裁掉的祖先段
-    for (let i = crumbStart; i < crumbN; i++) crumbShow.push(breadcrumbs[i]);
-  }
-
-  const reload = useCallback(async (opts: { noErrorUi?: boolean } = {}) => {
-    // 记住此刻的选中集，重载后用「仍存在」的路径恢复选中，
-    // 避免打标签改名后外部 watch 触发的自动刷新把选中清空。
-    // 从 ref 读取而非依赖 selected：保持 reload 身份稳定，避免选中变化重建监听
-    // （应尽量避免把高状态放入 reload 的依赖，见下方 watch effect）。
-    const prevSelected = new Set(selectedRef.current);
-    // silent：后台刷新不触发 loading 闪烁（轮询/自动刷新/F5 复用）
-    const result = await loadDir(path, { silent: true, noErrorUi: opts.noErrorUi });
-    const list = result?.list ?? null;
-    if (prevSelected.size && list) {
-      const live = new Set(list.map((e) => e.path));
-      const keep = [...prevSelected].filter((p) => live.has(p));
-      if (keep.length) setSelected(new Set(keep));
-    }
-    return result;
-  }, [path, loadDir]);
-
-  // 外部对当前目录的变动（增删改）自动刷新。
-  // 本地路径用 watchImmediate（事件驱动）；UNC 网络共享不支持文件监听，
-  // 降级为 3 秒定时轮询，避免外部改动无法反映到列表。
-  // 依赖里只有 path：reload 已去掉 selected 依赖，选中变化不再重建订阅
-  // （否则每次点击都会 dispose + 重建 watch，UNC 轮询的 inFlight/timeouts 也会被复位）。
-  useEffect(() => {
-    if (!path) return;
-    const isUnc = path.startsWith("\\\\");
-
-    // UNC：定时轮询。网络不可达时单次读取可能长时间挂起，
-    // 用 withTimeout 兜底超时；在途请求未返回则跳过本轮，避免并发堆积；
-    // 连续超时才提示一次，网络恢复后自动复位并清除提示。
-    if (isUnc) {
-      const POLL_TIMEOUT_MS = 8000;
-      let inFlight = false;
-      let timeouts = 0;
-      const timer = window.setInterval(() => {
-        if (inFlight) return;
-        inFlight = true;
-        void withTimeout(reload({ noErrorUi: true }), POLL_TIMEOUT_MS).then((r) => {
-          inFlight = false;
-          if (r === TIMEOUT) {
-            timeouts++;
-            if (timeouts === 3) showNotice("error", `网络路径响应超时：${path}`);
-            return;
-          }
-          const stuck = timeouts >= 3;
-          timeouts = 0;
-          if (r === null) showNotice("error", `无法访问网络路径：${path}`);
-          else if (stuck) clearNotice(); // 超时恢复后清除提示
-        });
-      }, 3000);
-      return () => window.clearInterval(timer);
-    }
-
-    // 本地：watchImmediate 事件驱动，防抖避免频繁重载闪烁
-    let timer: number | undefined;
-    // strictmode 双挂载时，已卸载实例上的异步 unlisten 也要释放，避免泄漏残留
-    let alive = true;
-    let unlisten: (() => void) | undefined;
-    watchImmediate(path, () => {
-      if (!alive) return;
-      window.clearTimeout(timer);
-      timer = window.setTimeout(() => {
-        // 本应用操作（打标签/删除/重命名）后已显式 reload，
-        // 由同一操作触发的 watch 事件在短窗口内跳过，避免重复加载闪烁。
-        if (Date.now() - selfOpAt.current < 1500) return;
-        void reload();
-      }, 300);
-    })
-      .then((fn) => {
-        if (!alive) fn();
-        else unlisten = fn;
-      })
-      .catch((e) => showNotice("error", `自动刷新监听失败：${e}`)); // 便于排查授权/路径问题
-    return () => {
-      alive = false;
-      window.clearTimeout(timer);
-      unlisten?.();
-    };
-  }, [path, reload, showNotice, clearNotice]);
-
-  /** 内部拖放「剪切」：把 paths 移动到目标文件夹并给出反馈 */
-  const moveIntoFolderFrom = useCallback(
-    async (dest: string, paths: string[]) => {
-      selfOpAt.current = Date.now();
-      try {
-        await moveIntoFolder(paths, dest);
-        await reload();
-        // 目标行闪一下"已接收"，让落点结果可见（目标文件夹仍在列表里）
-        setAcceptedPath(dest);
-        window.setTimeout(() => setAcceptedPath((cur) => (cur === dest ? null : cur)), 700);
-        const name = dest.split(/[\\/]/).filter(Boolean).pop() ?? dest;
-        showNotice("success", `已移动 ${paths.length} 项到「${name}」`);
-      } catch (e) {
-        showNotice("error", String(e));
-      }
-    },
-    [reload, showNotice]
-  );
-
-  // 拖拽中的落点高亮：主来源是 webview 的 enter/over 事件（推送式、延迟低，不需要 IPC 往返）。
-  // 兜底：某些平台/场景下自拖自落不送 over，则在 300ms 后启用低频轮询（150ms），
-  // 且一旦收到过 over 就不再轮询 —— 避免两套来源叠加造成抖动。
-  useEffect(() => {
-    let alive = true;
-    let unlisten: (() => void) | undefined;
-    const hitAt = (px: number, py: number) => {
-      const scale = winScaleRef.current || window.devicePixelRatio || 1;
-      return hitRowAtCursor(px, py, winOriginRef.current, scale);
-    };
-    getCurrentWebview()
-      .onDragDropEvent((ev) => {
-        if (!alive) return;
-        const p = ev.payload;
-        if (p.type === "leave") {
-          // 指针离开窗口：没有落点行（"可放置"虚线框仍保留到拖拽结束）
-          setDropTarget(null);
-          return;
-        }
-        if (p.type === "enter" || p.type === "over") {
-          sawOverRef.current = true;
-          const hit = hitAt(p.position.x, p.position.y);
-          const next = hit?.isDir ? hit.path : null;
-          setDropTarget((cur) => (cur === next ? cur : next));
-          return;
-        }
-        // drop：按落点判断功能 —— 命中文件夹行且拖的是本目录条目 → 移动
-        setDropTarget(null);
-        setDragging(false); // 兜底：原生拖拽的 Promise 若未及时结束，这里也收掉"拖拽中"
-        const hit = hitAt(p.position.x, p.position.y);
-        const dest = hit?.isDir ? hit.path : dropTargetRef.current;
-        if (!dest) return;
-        const internal = p.paths.filter((q) => entriesRef.current.some((en) => en.path === q));
-        if (internal.length === 0) return; // 从系统拖进来的外部文件不动
-        void moveIntoFolderFrom(dest, internal);
-      })
-      .then((fn) => {
-        if (alive) unlisten = fn;
-        else fn();
-      })
-      .catch((e) => console.error("注册拖放监听失败:", e));
-    return () => {
-      alive = false;
-      unlisten?.();
-    };
-  }, [moveIntoFolderFrom]);
-
-  useEffect(() => {
-    if (!dragging) return;
-    let cancelled = false;
-    let inFlight = false;
-    let timer: number | undefined;
-    const arm = window.setTimeout(() => {
-      if (cancelled || sawOverRef.current) return; // over 事件可用 → 无需轮询
-      timer = window.setInterval(async () => {
-        if (cancelled || inFlight || sawOverRef.current || !draggingRef.current) return;
-        inFlight = true;
-        try {
-          const p = await cursorPosition();
-          const scale = winScaleRef.current || window.devicePixelRatio || 1;
-          const hit = hitRowAtCursor(p.x, p.y, winOriginRef.current, scale);
-          const next = hit?.isDir ? hit.path : null;
-          setDropTarget((cur) => (cur === next ? cur : next));
-        } catch {
-          /* 取不到光标：忽略，下一轮再试 */
-        } finally {
-          inFlight = false;
-        }
-      }, 150);
-    }, 300);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(arm);
-      if (timer !== undefined) window.clearInterval(timer);
-    };
-  }, [dragging]);
-
-  // 地址栏进入编辑态时聚焦并全选
-  useEffect(() => {
-    if (addrEdit && addrRef.current) {
-      addrRef.current.focus();
-      addrRef.current.select();
-    }
-  }, [addrEdit]);
-
-  // 点击地址栏历史下拉外部或 Esc 时关闭
-  useEffect(() => {
-    if (!histOpen) return;
-    const onDoc = (e: MouseEvent) => {
-      if (!addrWrapRef.current?.contains(e.target as Node)) setHistOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setHistOpen(false);
-    };
-    const deferAdd = window.setTimeout(
-      () => window.addEventListener("mousedown", onDoc, true),
-      0
-    ); // 延迟到本次按钮事件之后，避免打开即关闭
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.clearTimeout(deferAdd);
-      window.removeEventListener("mousedown", onDoc, true);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [histOpen]);
-
-  // 点击菜单外部、滚动、Esc 时关闭右键菜单
-  useEffect(() => {
-    if (!ctxMenu) return;
-    const close = () => setCtxMenu(null);
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
-    };
-    const deferAdd = window.setTimeout(() => window.addEventListener("click", close), 0); // 延迟避免同次右键立即关闭
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("scroll", close, true);
-    return () => {
-      window.clearTimeout(deferAdd);
-      window.removeEventListener("click", close);
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("scroll", close, true);
-    };
-  }, [ctxMenu]);
-
-  const applyTagToSelection = useCallback(async () => {
-    selfOpAt.current = Date.now();
-    const tag = tagInput.trim();
-    if (!tag || selected.size === 0) {
-      showNotice("error", selected.size === 0 ? "请先在列表中选择文件" : "标签不能为空");
-      return;
-    }
-    clearNotice();
-    try {
-      // addTag 返回改名后的新路径，收集用于重载后恢复选中
-      const newPaths: string[] = [];
-      for (const p of selected) newPaths.push(await addTag(p, tag));
-      await reload();
-      if (newPaths.length) setSelected(new Set(newPaths));
-    } catch (e) {
-      showNotice("error", String(e));
-    }
-  }, [tagInput, selected, reload, showNotice, clearNotice]);
-
-  /** 侧栏标签点击：给所有选中项打该标签，已含该标签的项自动忽略 */
-  const applyTagFromSidebar = useCallback(
-    async (tag: string) => {
-      if (selected.size === 0) return;
-      selfOpAt.current = Date.now();
-      clearNotice();
-      const byPath = new Map<string, string[]>();
-      for (const e of entries) byPath.set(e.path, e.tags);
-      const targets = [...selected].filter((p) => !(byPath.get(p) ?? []).includes(tag));
-      // 所有选中项已含该标签：无需改动，保留当前选中直接返回
-      if (targets.length === 0) return;
-      try {
-        const newPaths: string[] = [];
-        for (const p of targets) newPaths.push(await addTag(p, tag));
-        await reload();
-        // 重载会清空选中，用改名后的新路径恢复选中
-        setSelected(new Set(newPaths));
-      } catch (e) {
-        showNotice("error", String(e));
-      }
-    },
-    [selected, entries, reload, showNotice, clearNotice]
-  );
-
-  const removeTagFrom = useCallback(
-    async (entry: FileEntry, tag: string) => {
-      selfOpAt.current = Date.now();
-      try {
-        await removeTag(entry.path, tag);
-        await reload();
-      } catch (e) {
-        showNotice("error", String(e));
-      }
-    },
-    [reload, showNotice]
-  );
-
-  // 收敛所有下拉/弹层：地址栏历史、面包屑子目录、盘符、收藏
-  const closeAllPopups = useCallback(() => {
-    setHistOpen(false);
-    setCrumbMenu(null);
-    setDriveOpen(false);
-    setFavOpen(false);
-  }, []);
-
-  const closeCtxMenu = useCallback(() => setCtxMenu(null), []);
-
-  // 打开右键菜单；行已被多选时作用于整个多选，否则作用于该单行
-  const openCtxMenu = useCallback(
-    (e: MouseEvent, entry: FileEntry, selectedKeys: Set<string>) => {
-      e.preventDefault();
-      closeAllPopups();
-      const inMulti =
-        selectedKeys.size > 1 && selectedKeys.has(entry.path)
-          ? Array.from(selectedKeys)
-          : [entry.path];
-      // 多选时「解散文件夹」仅当全部为目录才可用
-      const allDirs =
-        inMulti.length > 1 && inMulti.every((p) => entries.find((x) => x.path === p)?.is_dir);
-      setCtxMenu({ x: e.clientX, y: e.clientY, paths: inMulti, single: entry, allDirs });
-    },
-    [entries, closeAllPopups]
-  );
-
-  // 移除目标路径的「打标签」：清空其所有标签
-  const clearAllTags = useCallback(
-    async (paths: string[]) => {
-      selfOpAt.current = Date.now();
-      try {
-        for (const p of paths) {
-          const e = entries.find((x) => x.path === p);
-          if (!e) continue;
-          // 每移除一个标签就会改名一次，需用返回的新路径作为下一次的源路径，
-          // 否则旧路径文件已不存在，会报「系统找不到指定的文件」。
-          let cur = p;
-          for (const t of e.tags) cur = await removeTag(cur, t);
-        }
-        await reload();
-      } catch (err) {
-        showNotice("error", String(err));
-      }
-    },
-    [entries, reload, showNotice]
-  );
-
-  const toggleSelect = useCallback((entry: FileEntry, additive: boolean) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (additive) {
-        if (next.has(entry.path)) next.delete(entry.path);
-        else next.add(entry.path);
-      } else {
-        if (next.size === 1 && next.has(entry.path)) return prev; // 已选中则保留
-        next.clear();
-        next.add(entry.path);
-      }
-      return next;
-    });
-  }, []);
-
-  const openItem = useCallback(
-    (entry: FileEntry) => {
-      if (entry.is_dir) {
-        lastEnterRef.current = { parent: path, childPath: entry.path };
-        navigate(entry.path);
-      } else openInDefault(entry.path).catch((e) => showNotice("error", String(e)));
-    },
-    [navigate, path, showNotice]
-  );
-
-  // visibleEntries 变化时钳制光标落在有效范围内
-  useEffect(() => {
-    if (visibleEntries.length === 0) setCursor(-1);
-    else if (cursor >= visibleEntries.length) setCursor(visibleEntries.length - 1);
-  }, [visibleEntries.length, cursor]);
-
-  const focusRow = useCallback((i: number) => {
-    const el = rowRefs.current[i];
-    if (el) {
-      el.focus({ preventScroll: true });
-      el.scrollIntoView({ block: "nearest" });
-    }
-  }, []);
-
-  // 光标移动 = 替换为单选选中该行（与资源管理器一致），并更新范围锚点
-  const selectOnly = useCallback(
-    (i: number) => {
-      const e = visibleEntries[i];
-      if (!e) return;
-      setSelected(new Set([e.path]));
-      setCursor(i);
-      anchor.current = i;
-      focusRow(i);
-    },
-    [visibleEntries, focusRow]
-  );
-
-  // 返回上级后恢复光标：在加载完成的列表里定位最近进入的那个子目录
-  useEffect(() => {
-    if (!pendingFocus) return;
-    const i = visibleEntries.findIndex((e) => e.path === pendingFocus);
-    if (i < 0) return; // 列表还没加载到位，等下次 visibleEntries 变化再试
-    selectOnly(i);
-    setPendingFocus(null);
-  }, [pendingFocus, visibleEntries, selectOnly]);
-
-  // 选中 [a,b] 之间的连续行；merge 为 true 时并入现有选中（用于 Shift）
-  const setRange = useCallback(
-    (a: number, b: number, merge: boolean) => {
-      const L = visibleEntries.length;
-      if (L === 0) return;
-      const lo = Math.max(0, Math.min(a, b));
-      const hi = Math.min(L - 1, Math.max(a, b));
-      const paths = visibleEntries.slice(lo, hi + 1).map((e) => e.path);
-      setSelected((prev) => {
-        const next: Set<string> = merge ? new Set(prev) : new Set();
-        for (const p of paths) next.add(p);
-        return next;
-      });
-      const cur = Math.max(0, Math.min(b, L - 1));
-      setCursor(cur);
-      focusRow(cur);
-    },
-    [visibleEntries, focusRow]
-  );
-
-  // PageUp/PageDown 翻页步长：按可见区域能容纳的行数。
-  // 行高取首行实测值（而非硬编码常量），避免与 CSS 里的 .row 高度脱钩。
-  const pageStep = useCallback(() => {
-    const body = bodyRef.current;
-    if (!body) return 8;
-    const rowH = body.firstElementChild?.getBoundingClientRect().height;
-    const h = rowH && rowH > 0 ? rowH : 40; // 兜底值与 styles.css 的 .row min-height 一致
-    return Math.max(1, Math.floor(body.clientHeight / h) - 1);
-  }, []);
-
-  // 行内重命名：提交（Enter / 失焦）
-  const commitRename = useCallback(async () => {
-    if (renameCommitted.current) return;
-    renameCommitted.current = true;
-    selfOpAt.current = Date.now();
-    const idx = renamingIdx;
-    const entry = idx == null ? null : visibleEntries[idx];
-    // 值从输入框 DOM 读取（该输入框是非受控的）：避免每个按键都 setState 让整表重渲染
-    const v = (renameRef.current?.value ?? "").trim();
-    setRenamingIdx(null);
-    if (!entry || !v || v === entry.name) return;
-    const newPath =
-      entry.path.slice(0, entry.path.length - entry.name.length) + v;
-    try {
-      await renameFile(entry.path, newPath);
-      await reload();
-    } catch (e) {
-      showNotice("error", String(e));
-    }
-  }, [renamingIdx, visibleEntries, reload, showNotice]);
-
-  // 开始对光标行重命名（F2）；输入框自身以 defaultValue 承载初值，无需再写状态
-  const startRename = useCallback(() => {
-    if (cursor < 0) return;
-    renameCommitted.current = false;
-    setRenamingIdx(cursor);
-  }, [cursor]);
-
-  // 键盘把选中光标移到第 n 行时，若预览已打开则跟随光标：
-  // 文件切换预览（手势内同步挂载保证带声自动播放）、目录关闭预览。
-  const syncPreview = useCallback(
-    (n: number) => {
-      if (!previewPath) return;
-      const target = visibleEntries[n];
-      if (!target) return;
-      if (target.is_dir) setPreviewPath(null);
-      else flushSync(() => setPreviewPath(target.path));
-    },
-    [previewPath, visibleEntries, setPreviewPath]
-  );
-
-  const handleRowKeyDown = useCallback(
-    (ev: ReactKeyboardEvent) => {
-      const L = visibleEntries.length;
-      if (L === 0) return;
-      const i = Math.max(0, Math.min(cursor, L - 1));
-      const shift = ev.shiftKey;
-      const ctrl = ev.ctrlKey || ev.metaKey;
-      // 方向移动：支持 Shift 范围多选、Ctrl 仅移动光标不动选中
-      const move = (next: number) => {
-        ev.preventDefault();
-        const n = Math.max(0, Math.min(next, L - 1));
-        if (shift) {
-          if (anchor.current < 0) anchor.current = i;
-          setRange(anchor.current, n, true);
-        } else if (ctrl) {
-          setCursor(n);
-          focusRow(n);
-        } else {
-          selectOnly(n);
-          syncPreview(n);
-        }
-      };
-      switch (ev.key) {
-        case "ArrowDown":
-          move(i + 1);
-          break;
-        case "ArrowUp":
-          move(i - 1);
-          break;
-        case "Home":
-          ev.preventDefault();
-          if (shift) setRange(anchor.current < 0 ? i : anchor.current, 0, true);
-          else {
-            selectOnly(0);
-            syncPreview(0);
-          }
-          break;
-        case "End":
-          ev.preventDefault();
-          if (shift)
-            setRange(anchor.current < 0 ? i : anchor.current, L - 1, true);
-          else {
-            selectOnly(L - 1);
-            syncPreview(L - 1);
-          }
-          break;
-        case "PageDown":
-          move(i + pageStep());
-          break;
-        case "PageUp":
-          move(i - pageStep());
-          break;
-        case "Enter":
-          ev.preventDefault();
-          openItem(visibleEntries[i]);
-          break;
-        case "Backspace":
-          ev.preventDefault();
-          goUp();
-          break;
-      }
-    },
-    [
-      visibleEntries,
-      cursor,
-      selectOnly,
-      setRange,
-      pageStep,
-      openItem,
-      goUp,
-      focusRow,
-      syncPreview,
-    ]
-  );
-
-  // 全局快捷键：Ctrl+A 全选、Esc 清除、F2 重命名、F5 刷新、打字定位（输入框内不响应）
-  // 注意：删除与撤销/重做暂无快捷键（后端命令已就绪，界面未接入，见 PLAN.md）
-  const handleAppKeyDown = useCallback(
-    (ev: ReactKeyboardEvent) => {
-      const t = ev.target as HTMLElement | null;
-      // 输入框内一律让位给文本编辑
-      if (t && isEditableTarget(t)) return;
-      // 焦点在按钮/链接/菜单项上时，空格要留给它们自身的激活语义
-      const onControl = !!t && isInteractiveTarget(t);
-      const ctrl = ev.ctrlKey || ev.metaKey;
-      if (ctrl && (ev.key === "a" || ev.key === "A")) {
-        ev.preventDefault();
-        setSelected(new Set(visibleEntries.map((e) => e.path)));
-        return;
-      }
-      // 复制路径：Ctrl+Shift+C（资源管理器惯例）
-      if (ctrl && ev.shiftKey && (ev.key === "C" || ev.key === "c")) {
-        ev.preventDefault();
-        const target = visibleEntries.find((e) => selected.has(e.path));
-        if (target) copyWithNotice(target.path, "路径");
-        return;
-      }
-      // 复制文件名：Ctrl+C（仅文本，非文件级剪贴板）
-      if (ctrl && !ev.shiftKey && (ev.key === "C" || ev.key === "c")) {
-        ev.preventDefault();
-        const target = visibleEntries.find((e) => selected.has(e.path));
-        if (target) copyWithNotice(target.name, "文件名");
-        return;
-      }
-      // 空格预览：打开时再按关闭；未打开时预览当前选中文件（目录不预览）
-      // 焦点在按钮等控件上时不拦截，否则按钮按空格既激活不了、还会顺手弹预览
-      if ((ev.key === " " || ev.code === "Space") && !onControl) {
-        ev.preventDefault();
-        if (previewPath) {
-          setPreviewPath(null);
-        } else {
-          const target = visibleEntries.find((e) => selected.has(e.path));
-          // flushSync：让预览媒体在本次键盘手势内同步挂载，带声自动播放才被浏览器放行
-          if (target && !target.is_dir) flushSync(() => setPreviewPath(target.path));
-        }
-        return;
-      }
-      if (ev.key === "Escape") {
-        // 预览打开时优先关闭预览，不清空选中
-        if (previewPath) {
-          setPreviewPath(null);
-          return;
-        }
-        setSelected(new Set());
-        anchor.current = -1;
-        return;
-      }
-      // F2 / F5 由下方 window 捕获层统一处理（会 stopImmediatePropagation），此处不再重复
-      // 打字定位：在列表上输入字符，按名称前缀（不区分大小写）跳转
-      if (!ctrl && !ev.altKey && ev.key.length === 1) {
-        window.clearTimeout(typeTimer.current);
-        typeBuf.current = (typeBuf.current + ev.key.toLowerCase()).slice(-40);
-        typeTimer.current = window.setTimeout(() => {
-          typeBuf.current = "";
-        }, 900);
-        const L = visibleEntries.length;
-        if (L === 0) return;
-        const start = cursor >= 0 ? cursor + 1 : 0;
-        const q = typeBuf.current;
-        for (let s = 0; s < L; s++) {
-          const j = (start + s) % L;
-          if (visibleEntries[j].name.toLowerCase().startsWith(q)) {
-            selectOnly(j);
-            break;
-          }
-        }
-      }
-    },
-    [visibleEntries, selected, selectOnly, cursor, previewPath, copyWithNotice]
-  );
-
-  // 取消选择后焦点在列表容器时，方向键重新起导航（光标 -1 时从首行开始）
-  const handleTableKeyDown = useCallback(
-    (ev: ReactKeyboardEvent) => {
-      if (cursor >= 0) return;
-      if (visibleEntries.length === 0) return;
-      if (
-        ["ArrowDown", "End", "PageDown", "ArrowUp", "Home", "PageUp"].includes(
-          ev.key
-        )
-      ) {
-        ev.preventDefault();
-        selectOnly(0);
-      }
-    },
-    [cursor, visibleEntries, selectOnly]
-  );
-
-  // 键盘导航（window 级捕获监听，焦点在窗口内非输入框处一律生效）：
-  // 裸 ←=返回上一层 · 裸 →=进入当前选中项 · F2=重命名 · F5=刷新。
-  // 与列表内的 ↑↓ 移动选中互不干扰；输入框内不拦截，保留光标编辑。
+  // 全局快捷键（window 级捕获监听，焦点在窗口内非输入框处一律生效）：
+  // 裸 ←=返回上一层 · 裸 →=进入当前选中项 · F2=重命名 · F5=刷新 · Delete=删除 · Ctrl+Z/Ctrl+Shift+Z=撤销/重做。
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
       const { altKey, key } = ev;
@@ -1564,6 +220,26 @@ const stepForward = useCallback(() => {
       if (key === "F5") {
         ev.preventDefault();
         reload();
+        ev.stopImmediatePropagation();
+        return;
+      }
+      // 撤销 / 重做：输入框内让位给文本编辑
+      if ((ev.ctrlKey || ev.metaKey) && !altKey && (key === "z" || key === "Z")) {
+        if (inInput) return;
+        ev.preventDefault();
+        if (ev.shiftKey) doRedo();
+        else doUndo();
+        ev.stopImmediatePropagation();
+        return;
+      }
+      // 删除到回收站：输入框/自带语义的控件/弹层内不响应
+      if (key === "Delete" && !ev.ctrlKey && !ev.metaKey && !altKey) {
+        if (inInput) return;
+        if (t && isInteractiveTarget(t)) return;
+        if (popupOpenRef.current) return;
+        if (selected.size === 0) return;
+        ev.preventDefault();
+        requestDelete([...selected]);
         ev.stopImmediatePropagation();
         return;
       }
@@ -1587,7 +263,19 @@ const stepForward = useCallback(() => {
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [goUp, openItem, cursor, visibleEntries, stepForward, startRename, reload]);
+  }, [
+    goUp,
+    openItem,
+    cursor,
+    visibleEntries,
+    stepForward,
+    startRename,
+    reload,
+    doUndo,
+    doRedo,
+    requestDelete,
+    selected,
+  ]);
 
   // 行组件的事件入口：每帧刷新为最新闭包（行组件只持有这个 ref，故 memo 命中时也不会用到旧状态）
   const rowActionsRef = useRef<RowActions>({
@@ -1605,57 +293,8 @@ const stepForward = useCallback(() => {
     attachRef: (el, idx) => {
       rowRefs.current[idx] = el;
     },
-    dragStart: (ev, e) => {
-      // 单一手势、按"落在哪"区分功能：
-      //   落在本窗口的文件夹行上 → 应用内移动（剪切）
-      //   落在窗口外（资源管理器/飞书等）→ 复制给对方，携带真实文件句柄
-      // 因此这里统一走原生 OS 拖拽（HTML5 拖拽给不出真实文件句柄，无法对外复制）。
-      ev.preventDefault();
-      const paths = selected.has(e.path) && selected.size > 1 ? [...selected] : [e.path];
-      sawOverRef.current = false;
-      setDragging(true);
-      void (async () => {
-        // 记录窗口原点与缩放：拖放事件/兜底轮询给的都是物理像素
-        try {
-          const [origin, scale] = await Promise.all([win.innerPosition(), win.scaleFactor()]);
-          winOriginRef.current = { x: origin.x, y: origin.y };
-          winScaleRef.current = scale || 1;
-        } catch {
-          /* 取不到就退回 devicePixelRatio */
-        }
-        // 先让"可放置"提示绘制出来：原生拖拽会接管消息循环，期间未必还能重绘
-        await new Promise((r) => setTimeout(r, 40));
-        try {
-          await startDrag({
-            item: paths,
-            icon: makeDragCanvas(paths.length).toDataURL("image/png"),
-            mode: "copy",
-          });
-        } catch (err) {
-          console.error("原生拖拽失败:", err);
-        } finally {
-          setDragging(false);
-          setDropTarget(null);
-        }
-      })();
-    },
-    click: (ev, e, idx) => {
-      if (ev.shiftKey) {
-        if (anchor.current < 0) anchor.current = cursor >= 0 ? cursor : idx;
-        setRange(anchor.current, idx, true);
-        focusRow(idx);
-      } else if (ev.ctrlKey || ev.metaKey) {
-        toggleSelect(e, true);
-        setCursor(idx);
-        anchor.current = idx;
-        focusRow(idx);
-      } else {
-        selectOnly(idx);
-        // 预览已打开时跟随选中：点到文件切换预览、点到目录关闭预览。
-        // flushSync 在手势内同步挂载新媒体，保证带声自动播放
-        if (previewPath) flushSync(() => setPreviewPath(e.is_dir ? null : e.path));
-      }
-    },
+    dragStart,
+    click: rowClick,
     dblclick: (e) => openItem(e),
     keydown: handleRowKeyDown,
     contextMenu: (ev, e) => {
@@ -1679,401 +318,67 @@ const stepForward = useCallback(() => {
       onContextMenu={(e) => e.preventDefault()}
     >
       {/* 自定义标题栏（跨平台统一风格，可拖拽） */}
-      <header
-        className="titlebar"
-        data-tauri-drag-region
-        onDoubleClick={(e) => {
-          if ((e.target as HTMLElement).closest(".win-control, .traffic"))
-            return;
-          win.toggleMaximize();
-        }}
-      >
-        {isMac ? (
-          <div className="traffic">
-            <button
-              className="t-btn close"
-              title="关闭"
-              onClick={() => win.close()}
-            />
-            <button
-              className="t-btn minimize"
-              title="最小化"
-              onClick={() => win.minimize()}
-            />
-            <button
-              className="t-btn maximize"
-              title={isMax ? "还原" : "最大化"}
-              onClick={() => win.toggleMaximize()}
-            />
-          </div>
-        ) : null}
-
-        <div className="titlebar-id" data-tauri-drag-region>
-          <span className="titlebar-mark" aria-hidden="true">#</span>
-          <span className="titlebar-name" data-tauri-drag-region>
-            标签匣
-            {appVersion ? (
-              <span className="titlebar-ver" data-tauri-drag-region>v{appVersion}</span>
-            ) : null}
-          </span>
-        </div>
-
-        {!isMac ? (
-          <div className="win-control">
-            <button title="最小化" onClick={() => win.minimize()}>
-              <IconMinus size={15} />
-            </button>
-            <button
-              title={isMax ? "还原" : "最大化"}
-              onClick={() => win.toggleMaximize()}
-            >
-              {isMax ? <IconRestore size={14} /> : <IconMaximize size={13} />}
-            </button>
-            <button
-              className="close"
-              title="关闭"
-              onClick={() => win.close()}
-            >
-              <IconClose size={15} />
-            </button>
-          </div>
-        ) : null}
-      </header>
+      <TitleBar isMac={isMac} isMax={isMax} appVersion={appVersion} />
 
       {/* 顶部工具栏 */}
       <header className="topbar">
-        <div className="nav-btns">
-          <button className="icon-btn" disabled={histIdx <= 0} onClick={goBack} title="后退" aria-label="后退">
-            <IconArrowLeft size={16} />
-          </button>
-          <button
-            className="icon-btn"
-            disabled={histIdx >= hist.length - 1}
-            onClick={goForward}
-            title="前进"
-            aria-label="前进"
-          >
-            <IconArrowRight size={16} />
-          </button>
-          <button className="icon-btn" onClick={goUp} title="上一级" aria-label="上一级" disabled={!parentOf(path)}>
-            <IconArrowUp size={16} />
-          </button>
-          <button className="icon-btn refresh-btn" onClick={() => void reload()} title="刷新 (F5)" aria-label="刷新">
-            <IconRedo size={16} />
-          </button>
-          <div className="vsep" />
-          <div className="fav-select" ref={favWrapRef} onKeyDown={(ev) => menuKeyNav(ev, () => setFavOpen(false))}>
-            <button
-              className={`icon-btn fav-trigger ${favOpen ? "active" : ""}`}
-              onClick={(ev) => {
-                ev.stopPropagation();
-                const will = !favOpen;
-                closeAllPopups();
-                if (will) setFavOpen(true);
-              }}
-              title="收藏路径"
-              aria-label="收藏路径"
-              aria-haspopup="menu"
-              aria-expanded={favOpen}
-            >
-              <IconBookmark size={16} filled={favorites.length > 0} />
-            </button>
-            {favOpen && (
-              <div className="fav-menu" role="menu" aria-label="收藏路径">
-                <div className="fav-menu-title">收藏路径</div>
-                {favorites.length === 0 ? (
-                  <div className="fav-menu-empty">暂无收藏</div>
-                ) : (
-                  favorites.map((p) => (
-                    // 行容器不承担交互：路径与删除各自是独立的 menuitem，
-                    // 避免此前「删除按钮（role=button）嵌套在按钮内」的非法结构与键盘不可达
-                    <div key={p} className={`fav-item ${p === path ? "cur" : ""}`}>
-                      <button
-                        role="menuitem"
-                        className="fav-item-main"
-                        title={p}
-                        onClick={(ev) => {
-                          ev.stopPropagation();
-                          setFavOpen(false);
-                          if (p !== path) void navigate(p);
-                        }}
-                      >
-                        <IconFolder size={14} className="fav-item-icon" />
-                        <span className="fav-item-path">{p}</span>
-                      </button>
-                      <button
-                        role="menuitem"
-                        className="fav-item-del"
-                        aria-label={`从收藏中移除 ${p}`}
-                        title="从收藏中移除"
-                        onClick={(ev) => {
-                          ev.stopPropagation();
-                          toggleFavorite(p);
-                        }}
-                      >
-                        ×
-                      </button>
-                    </div>
-                  ))
-                )}
-              </div>
-            )}
-          </div>
-          <div className="drive-select" ref={driveWrapRef} onKeyDown={(ev) => menuKeyNav(ev, () => setDriveOpen(false))}>
-            <button
-              className="drive-trigger"
-              onClick={(ev) => {
-                ev.stopPropagation();
-                const will = !driveOpen;
-                closeAllPopups();
-                if (will) setDriveOpen(true);
-              }}
-              title={currentDrive ?? "网络位置（无盘符）"}
-              aria-haspopup="menu"
-              aria-expanded={driveOpen}
-            >
-              {currentDrive ? (
-                <span>{currentDrive.replace("\\", "")}</span>
-              ) : (
-                <IconGlobe size={16} />
-              )}
-              <IconSortArrow dir="desc" size={11} className="caret" />
-            </button>
-            {driveOpen && (
-              <div className="drive-menu" role="menu" aria-label="选择盘符">
-                {drives.map((d) => (
-                  <button
-                    key={d}
-                    role="menuitem"
-                    className={`drive-item ${path.startsWith(d) ? "active" : ""}`}
-                    onClick={(ev) => {
-                      ev.stopPropagation();
-                      setDriveOpen(false);
-                      navigate(d);
-                    }}
-                  >
-                    <span className="drive-item-label">{d.replace("\\", "")}</span>
-                    <span className="drive-item-path">{d}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
+        <Toolbar
+          histIdx={histIdx}
+          histLen={hist.length}
+          canUp={!!parentOf(path)}
+          goBack={goBack}
+          goForward={goForward}
+          goUp={goUp}
+          onRefresh={() => void reload()}
+          canUndo={canUndo}
+          canRedo={canRedo}
+          onUndo={doUndo}
+          onRedo={doRedo}
+          path={path}
+          favorites={address.favorites}
+          favOpen={address.favOpen}
+          setFavOpen={address.setFavOpen}
+          toggleFavorite={address.toggleFavorite}
+          drives={drives}
+          driveOpen={address.driveOpen}
+          setDriveOpen={address.setDriveOpen}
+          currentDrive={currentDrive}
+          closeAllPopups={address.closeAllPopups}
+          navigate={navigate}
+          favWrapRef={address.favWrapRef}
+          driveWrapRef={address.driveWrapRef}
+        />
 
-        <div className="addrbar" ref={addrWrapRef} onMouseLeave={closeCrumbMenuSoon}>
-          {addrEdit ? (
-            <input
-              ref={addrRef}
-              className="addr-input"
-              autoComplete="off"
-              value={addrValue}
-              onChange={(e) => setAddrValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  if (!addrValue.trim()) {
-                    // 清空输入后回车：保持编辑态，光标留在输入框，不跳转不退出
-                    addrRef.current?.focus();
-                    e.preventDefault();
-                    return;
-                  }
-                  commitAddr();
-                } else if (e.key === "Escape") cancelAddr();
-              }}
-              onBlur={commitAddr}
-            />
-          ) : (
-            <>
-              <div className="crumbbar" ref={crumbbarRef} onClick={beginAddrEdit} title="点击编辑地址">
-                {crumbShow.map((c, i) =>
-                  c === null ? (
-                    <span className="crumb crumb-ellipsis" key="ellipsis">
-                      <span className="crumb-ellipsis-dot" aria-hidden="true">
-                        …
-                      </span>
-                      <span className="crumb-sep">{isMac ? "/" : "\\"}</span>
-                    </span>
-                  ) : (
-                    <span
-                      className="crumb"
-                      key={i}
-                      onMouseEnter={(ev) => openCrumbMenu(c.path, ev.currentTarget)}
-                    >
-                      <button
-                        className={c.path === path ? "cur" : ""}
-                        onClick={(ev) => {
-                          ev.stopPropagation(); // 避免冒泡到容器的进入编辑态
-                          setCrumbMenu(null);
-                          navigate(c.path);
-                        }}
-                      >
-                        {c.label}
-                      </button>
-                      <span className="crumb-sep">{isMac ? "/" : "\\"}</span>
-                    </span>
-                  )
-                )}
-              </div>
-              <button
-                className={`addr-edit-btn ${isFavorite ? "active" : ""}`}
-                disabled={!path}
-                onClick={(ev) => {
-                  ev.stopPropagation();
-                  if (isFavorite) {
-                    toggleFavorite(path);
-                    showNotice("info", "已取消收藏");
-                  } else {
-                    toggleFavorite(path);
-                    showNotice("success", "已收藏");
-                  }
-                }}
-                title={isFavorite ? "取消收藏当前路径" : "收藏当前路径"}
-                aria-label={isFavorite ? "取消收藏当前路径" : "收藏当前路径"}
-                aria-pressed={isFavorite}
-              >
-                <IconStar size={14} filled={isFavorite} />
-              </button>
-              <button
-                className="addr-edit-btn"
-                disabled={!path}
-                onClick={(ev) => {
-                  ev.stopPropagation();
-                  void copyText(path).then(
-                    () => showNotice("success", "已复制地址"),
-                    () => showNotice("error", "复制失败")
-                  );
-                }}
-                title="复制地址"
-                aria-label="复制地址"
-              >
-                <IconCopy size={14} />
-              </button>
-              <button
-                className="addr-edit-btn"
-                disabled={!path}
-                onClick={(ev) => {
-                  ev.stopPropagation();
-                  void openInDefault(path).catch(() => showNotice("error", "打开失败"));
-                }}
-                title="用系统资源管理器打开"
-                aria-label="用系统资源管理器打开"
-              >
-                <IconOpenExternal size={14} />
-              </button>
-              <button
-                className={`addr-edit-btn ${histOpen ? "active" : ""}`}
-                onClick={(ev) => {
-                  ev.stopPropagation();
-                  const will = !histOpen;
-                  closeAllPopups();
-                  if (will) setHistOpen(true);
-                }}
-                title="浏览访问历史"
-                aria-label="浏览访问历史"
-                aria-haspopup="menu"
-                aria-expanded={histOpen}
-              >
-                <IconSortArrow dir="desc" size={12} className="caret" />
-              </button>
-              {histOpen && (
-                <div
-                  className="addr-hist"
-                  role="menu"
-                  aria-label="最近的路径"
-                  tabIndex={-1}
-                  ref={histPanelRef}
-                  onKeyDown={histKeyNav}
-                >
-                  <div className="addr-hist-title">最近的路径</div>
-                  {addrHist.length === 0 ? (
-                    <div className="addr-hist-empty">暂无记录</div>
-                  ) : (
-                    addrHist.map((p, i) => (
-                      <button
-                        key={p}
-                        ref={(el) => {
-                          histItemRefs.current[i] = el;
-                        }}
-                        role="menuitem"
-                        tabIndex={histFocus === i ? 0 : -1}
-                        className={`addr-hist-item ${p === path ? "cur" : ""} ${histFocus === i ? "focused" : ""}`}
-                        onMouseEnter={(ev) => {
-                          setHistFocus(i);
-                          ev.currentTarget.focus({ preventScroll: true });
-                        }}
-                        onClick={(ev) => {
-                          ev.stopPropagation();
-                          setHistOpen(false);
-                          if (p !== path) void navigate(p);
-                        }}
-                        title={p}
-                      >
-                        <IconFolder size={14} className="addr-hist-icon" />
-                        <span className="addr-hist-path">{p}</span>
-                        <span
-                          className="addr-hist-del"
-                          role="button"
-                          tabIndex={-1}
-                          aria-label={`从历史中移除 ${p}`}
-                          title="从历史中移除"
-                          onClick={(ev) => {
-                            ev.stopPropagation();
-                            setAddrHist((prev) => {
-                              const next = prev.filter((x) => x !== p);
-                              try {
-                                localStorage.setItem("zeta.addrHist", JSON.stringify(next));
-                              } catch {
-                                /* 忽略 */
-                              }
-                              return next;
-                            });
-                          }}
-                        >
-                          ×
-                        </span>
-                      </button>
-                    ))
-                  )}
-                </div>
-              )}
-              {crumbMenu && (
-                <div
-                  className="crumb-menu"
-                  style={{ left: crumbMenu.left, top: crumbMenu.top }}
-                  role="menu"
-                  aria-label="子文件夹"
-                  onMouseEnter={keepCrumbMenu}
-                  onMouseLeave={closeCrumbMenuSoon}
-                  onKeyDown={(ev) => menuKeyNav(ev, () => setCrumbMenu(null))}
-                  onClick={(ev) => ev.stopPropagation()}
-                >
-                  <div className="crumb-menu-title">{crumbMenu.path}</div>
-                  {crumbMenu.items.length === 0 ? (
-                    <div className="crumb-menu-empty">无子文件夹</div>
-                  ) : (
-                    crumbMenu.items.map((sub) => (
-                      <button
-                        key={sub}
-                        className="crumb-menu-item"
-                        role="menuitem"
-                        onClick={() => {
-                          setCrumbMenu(null);
-                          if (sub !== path) void navigate(sub);
-                        }}
-                        title={sub}
-                      >
-                        <IconFolder size={14} className="crumb-menu-icon" />
-                        <span className="crumb-menu-name">
-                          {sub.split(/\\|\//).filter(Boolean).pop()}
-                        </span>
-                      </button>
-                    ))
-                  )}
-                </div>
-              )}
-            </>
-          )}
-        </div>
+        <AddressBar
+          path={path}
+          addrEdit={address.addrEdit}
+          addrValue={address.addrValue}
+          setAddrValue={address.setAddrValue}
+          addrRef={address.addrRef}
+          addrWrapRef={address.addrWrapRef}
+          beginAddrEdit={address.beginAddrEdit}
+          commitAddr={address.commitAddr}
+          cancelAddr={address.cancelAddr}
+          histOpen={address.histOpen}
+          setHistOpen={address.setHistOpen}
+          addrHist={address.addrHist}
+          setAddrHist={address.setAddrHist}
+          histFocus={address.histFocus}
+          setHistFocus={address.setHistFocus}
+          histPanelRef={address.histPanelRef}
+          histItemRefs={address.histItemRefs}
+          histKeyNav={address.histKeyNav}
+          crumbMenu={address.crumbMenu}
+          setCrumbMenu={address.setCrumbMenu}
+          openCrumbMenu={address.openCrumbMenu}
+          closeCrumbMenuSoon={address.closeCrumbMenuSoon}
+          keepCrumbMenu={address.keepCrumbMenu}
+          navigate={navigate}
+          isFavorite={address.isFavorite}
+          toggleFavorite={address.toggleFavorite}
+          closeAllPopups={address.closeAllPopups}
+          showNotice={showNotice}
+        />
 
         {/* 筛选框：位于地址栏最右侧 */}
         <div className="search-wrap">
@@ -2108,180 +413,57 @@ const stepForward = useCallback(() => {
       )}
 
       <div className="content">
-        {/* 中央：文件列表 */}
-        <main className="filer">
-          {search && (
-            <div className="filer-head">
-              <span className="result-count">共 {visibleEntries.length} 项</span>
-            </div>
-          )}
-
-          <div
-            className="table"
-            tabIndex={0}
-            onClick={(ev) => {
-              // 点击空白处取消选择（点行内由行处理器接管）
-              if ((ev.target as HTMLElement).closest(".row")) return;
-              setSelected(new Set());
-              anchor.current = -1;
-              // 焦点交给光标行，保留方向键继续移动；无光标行时落回容器以便重新导航
-              if (cursor >= 0 && cursor < visibleEntries.length) focusRow(cursor);
-              else (ev.currentTarget as HTMLElement).focus();
-            }}
-            onKeyDown={handleTableKeyDown}
-          >
-            <div className="table-head">
-              <button className={`col name ${sortKey === "name" ? "sorted" : ""}`} title={sortKey === "name" ? (sortDesc ? "名称降序" : "名称升序") : "按名称排序"} onClick={(ev) => { ev.stopPropagation(); applySort("name"); }}>
-                名称
-                {sortKey === "name" && <IconSortArrow dir={sortDesc ? "desc" : "asc"} />}
-              </button>
-              <span className="col tags">标签</span>
-              <button className={`col date ${sortKey === "modified" ? "sorted" : ""}`} title={sortKey === "modified" ? (sortDesc ? "时间降序" : "时间升序") : "按修改时间排序"} onClick={(ev) => { ev.stopPropagation(); applySort("modified"); }}>
-                修改日期
-                {sortKey === "modified" && <IconSortArrow dir={sortDesc ? "desc" : "asc"} />}
-              </button>
-              <button className={`col size ${sortKey === "size" ? "sorted" : ""}`} title={sortKey === "size" ? (sortDesc ? "大小降序" : "大小升序") : "按大小排序"} onClick={(ev) => { ev.stopPropagation(); applySort("size"); }}>
-                大小
-                {sortKey === "size" && <IconSortArrow dir={sortDesc ? "desc" : "asc"} />}
-              </button>
-            </div>
-
-            {loading ? (
-              <div className="state loading">
-                <span className="spinner" />
-                载入中…
-              </div>
-            ) : visibleEntries.length === 0 ? (
-              <div className="state empty">
-                <IconFolder size={34} className="empty-icon" />
-                <p>{search ? "没有匹配的文件" : "此目录为空"}</p>
-              </div>
-            ) : (
-              <div
-                key={path}
-                className="table-body dir-enter"
-                ref={bodyRef}
-                role="listbox"
-                aria-multiselectable="true"
-                aria-label="文件列表"
-                onContextMenu={(ev) => {
-                  ev.preventDefault();
-                  ev.stopPropagation();
-                  const np = ev.nativeEvent;
-                  closeAllPopups();
-                  setCtxMenu({
-                    x: np.clientX,
-                    y: np.clientY,
-                    paths: [],
-                    single: null,
-                    allDirs: false,
-                  });
-                }}
-              >
-                {visibleEntries.map((e, idx) => (
-                  <Row
-                    key={e.path}
-                    entry={e}
-                    idx={idx}
-                    isCursor={idx === cursor}
-                    isSelected={selected.has(e.path)}
-                    isRenaming={idx === renamingIdx}
-                    isDissolving={dissolving.has(e.path)}
-                    isDroppable={dragging && e.is_dir}
-                    isDropTarget={dropTarget === e.path}
-                    isAccepted={acceptedPath === e.path}
-                    renameRef={renameRef}
-                    actions={rowActionsRef}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-        </main>
+        <FileTable
+          path={path}
+          entries={visibleEntries}
+          search={search}
+          loading={loading}
+          cursor={cursor}
+          selected={selected}
+          renamingIdx={renamingIdx}
+          dissolving={dissolving}
+          dragging={dragging}
+          dropTarget={dropTarget}
+          acceptedPath={acceptedPath}
+          sortKey={sortKey}
+          sortDesc={sortDesc}
+          applySort={applySort}
+          renameRef={renameRef}
+          bodyRef={bodyRef}
+          actions={rowActionsRef}
+          onTableClick={(ev) => {
+            // 点击空白处取消选择（点行内由行处理器接管）
+            if ((ev.target as HTMLElement).closest(".row")) return;
+            clearSelection();
+            // 焦点交给光标行，保留方向键继续移动；无光标行时落回容器以便重新导航
+            if (cursor >= 0 && cursor < visibleEntries.length) focusRow(cursor);
+            else (ev.currentTarget as HTMLElement).focus();
+          }}
+          onTableKeyDown={handleTableKeyDown}
+          onBodyContextMenu={(ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            openEmptyCtxMenu(ev.nativeEvent.clientX, ev.nativeEvent.clientY);
+          }}
+        />
 
         {/* 右侧：打标签工具 + 标签展示 */}
-        <aside className="tagbar">
-          <div className="tagbar-group">
-            <div className="tag-input-wrap">
-              <input
-                ref={tagInputRef}
-                className="tag-input"
-                autoComplete="off"
-                placeholder="输入标签"
-                value={tagInput}
-                onChange={(e) => setTagInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && applyTagToSelection()}
-              />
-              {tagInput && (
-                <button
-                  className="search-clear"
-                  onClick={() => {
-                    setTagInput("");
-                    // 清空后焦点回到输入框，方便继续输入
-                    tagInputRef.current?.focus();
-                  }}
-                  title="清空"
-                  aria-label="清空标签输入"
-                >
-                  <IconClose size={13} />
-                </button>
-              )}
-              <button
-                className="tag-apply"
-                onClick={applyTagToSelection}
-                disabled={selected.size === 0}
-                title={selected.size > 0 ? `给 ${selected.size} 个选中项打标签` : "先选中文件"}
-                aria-label="打标签"
-              >
-                <IconTag size={16} />
-              </button>
-            </div>
-          </div>
-
-          <div className="tagbar-group">
-            <ul className="tag-list">
-              {tagCounts.map(([tag, count]) => (
-                <li key={tag}>
-                  <button
-                    className="tag-row"
-                    onClick={() => applyTagFromSidebar(tag)}
-                    title="给选中项打此标签"
-                  >
-                    <span className="dot" style={{ background: tagColor(tag) }} />
-                    <span className="tag-name">#{tag}</span>
-                    <span className="tag-count">{count}</span>
-                  </button>
-                </li>
-              ))}
-              {tagCounts.length === 0 && (
-                <li className="empty-hint">目录中暂无标签，选中文件后点标签即可标记</li>
-              )}
-            </ul>
-          </div>
-        </aside>
+        <TagSidebar
+          tagCounts={tagCounts}
+          selectedCount={selected.size}
+          onApplyTag={applyTagToSelection}
+          onApplyFromSidebar={applyTagFromSidebar}
+        />
       </div>
 
       {/* 底部状态栏 */}
-      <footer className="statusbar">
-        <span>{selected.size > 0 ? `已选 ${selected.size} 项` : ""}</span>
-        {selected.size > 0 && <span className="vsep" />}
-        <span>{folders} 个文件夹 · {files} 个文件</span>
-        <span className="spacer" />
-        {/* 拖拽中给出明确指引：能拖到哪、松手会发生什么 */}
-        {dragging ? (
-          <span className="hint hint-drag">
-            {dropTarget
-              ? "松手：移动到高亮的文件夹"
-              : "拖到文件夹行即可移动到该文件夹 · 拖到窗口外可复制给其它应用"}
-          </span>
-        ) : (
-          /* 底部快捷提示：宽窗显示完整键盘捷径；窄窗收敛为高频句，避免被 55% 裁成断句 */
-          <span className="hint">
-            <span className="hint-long">单击选中 · ↑↓/Home/End 移动 · Shift 范围多选 · Enter/→ 打开 · Backspace/← 上级 · F2 重命名 · F5 刷新 · 输入字符定位</span>
-            <span className="hint-short">↑↓ 移动 · Shift 多选 · Enter 打开 · ← 上级 · F2 重命名</span>
-          </span>
-        )}
-      </footer>
+      <StatusBar
+        selectedCount={selected.size}
+        folders={folders}
+        files={files}
+        dragging={dragging}
+        dropTarget={dropTarget}
+      />
 
       {/* 自定义右键菜单 */}
       {ctxMenu && (
@@ -2325,60 +507,13 @@ const stepForward = useCallback(() => {
             const label =
               dirs.length === 1 ? `「${single!.name}」` : `所选 ${dirs.length} 个文件夹`;
             closeCtxMenu();
-            setDialog({
-              kind: "confirm",
-              title: "解散文件夹",
-              message: `解散${label}？\n其内部子项将分别上移到当前目录，空壳被删除（暂不支持撤销）。`,
-              confirmLabel: "解散",
-              action: () => {
-                void (async () => {
-                  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-                  if (!reduce) {
-                    setDissolving(new Set(dirs));
-                    await new Promise((r) => setTimeout(r, 160));
-                  }
-                  selfOpAt.current = Date.now();
-                  try {
-                    for (const p of dirs) await dissolveFolder(p);
-                    setDissolving(new Set());
-                    await reload();
-                  } catch (e) {
-                    setDissolving(new Set());
-                    showNotice("error", String(e));
-                  }
-                })();
-              },
-            });
+            requestDissolve(dirs, label);
           }}
           onCollect={() => {
             const paths = ctxMenu.paths;
             if (!paths.length) return;
             closeCtxMenu();
-            setDialog({
-              kind: "prompt",
-              title: "收入到文件夹",
-              label: "文件夹名",
-              defaultValue: "新建文件夹",
-              action: (name) => {
-                const trimmed = name.trim();
-                void (async () => {
-                  selfOpAt.current = Date.now();
-                  try {
-                    const folderPath = await collectIntoFolder(paths, trimmed);
-                    await reload();
-                    // reload 后闭包 visibleEntries 是旧值，直接 listDir 拿最新列表做下标计算
-                    const fresh = await listDir(path);
-                    const i = fresh.findIndex((e) => e.path === folderPath);
-                    if (i >= 0) {
-                      setCursor(i);
-                      selectOnly(i);
-                    }
-                  } catch (e) {
-                    showNotice("error", String(e));
-                  }
-                })();
-              },
-            });
+            requestCollect(paths);
           }}
           onClearTags={() => {
             if (!ctxMenu.paths.length) return;
@@ -2396,6 +531,12 @@ const stepForward = useCallback(() => {
             if (!single) return;
             closeCtxMenu();
             copyWithNotice(single.path, "路径");
+          }}
+          onDelete={() => {
+            if (!ctxMenu.paths.length) return;
+            const paths = ctxMenu.paths;
+            closeCtxMenu();
+            requestDelete(paths);
           }}
         />
       )}
@@ -2444,388 +585,6 @@ const stepForward = useCallback(() => {
         onChange={updateSettings}
         onClose={() => setSettingsOpen(false)}
       />
-    </div>
-  );
-}
-
-/** 统一的文件/文件夹类型图标 */
-function FileGlyph({ entry }: { entry: FileEntry }) {
-  if (entry.is_dir) {
-    return (
-      <span className="glyph dir" title="文件夹" aria-hidden="true">
-        <IconFolder size={19} />
-      </span>
-    );
-  }
-  const s = extStyle(entry.ext);
-  return (
-    <span
-      className="glyph file"
-      style={{ ["--glyph-c" as string]: s.color }}
-      title={entry.ext ? `${entry.ext} 文件` : "文件"}
-      aria-hidden="true"
-    >
-      <span className="glyph-label">{s.label}</span>
-    </span>
-  );
-}
-
-/**
- * 行事件处理器集合。
- * 父组件每帧把最新闭包写进一个 ref，行组件在事件触发时才从 ref 读取，
- * 这样即便该行因 memo 被跳过渲染，也不会执行到过期闭包。
- */
-type RowActions = {
-  attachRef: (el: HTMLDivElement | null, idx: number) => void;
-  dragStart: (ev: ReactDragEvent<HTMLDivElement>, entry: FileEntry) => void;
-  click: (ev: ReactMouseEvent<HTMLDivElement>, entry: FileEntry, idx: number) => void;
-  dblclick: (entry: FileEntry) => void;
-  keydown: (ev: ReactKeyboardEvent<HTMLDivElement>) => void;
-  contextMenu: (ev: ReactMouseEvent<HTMLDivElement>, entry: FileEntry) => void;
-  renameCommit: () => void;
-  renameCancel: () => void;
-  removeTag: (entry: FileEntry, tag: string) => void;
-};
-
-type RowProps = {
-  entry: FileEntry;
-  idx: number;
-  isCursor: boolean;
-  isSelected: boolean;
-  isRenaming: boolean;
-  isDissolving: boolean;
-  /** 拖拽进行中且本行是文件夹：显示"可放置"提示 */
-  isDroppable: boolean;
-  /** 当前落点（松手即移动到这里） */
-  isDropTarget: boolean;
-  /** 刚接收了本次拖放的条目：播一下"已接收"动画 */
-  isAccepted: boolean;
-  renameRef: { current: HTMLInputElement | null };
-  actions: { current: RowActions };
-};
-
-/**
- * 单行（memo 化）。
- * props 只有数据布尔量、下标与两个稳定引用，因此与行无关的 state（通知、标签输入、
- * 弹层开关、搜索框文字等）变化不会再让整表重渲染；只有 isCursor/isSelected 等真正
- * 变化的那一两行才重新渲染。
- */
-const Row = memo(function Row({
-  entry: e,
-  idx,
-  isCursor,
-  isSelected,
-  isRenaming,
-  isDissolving,
-  isDroppable,
-  isDropTarget,
-  isAccepted,
-  renameRef,
-  actions,
-}: RowProps) {
-  return (
-    <div
-      ref={(el) => actions.current.attachRef(el, idx)}
-      tabIndex={isCursor ? 0 : -1}
-      role="option"
-      aria-selected={isSelected}
-      // data-row-* 是行身份的显式标记，便于调试与将来做行级别的外部定位/测试
-      data-row-path={e.path}
-      data-row-is-dir={e.is_dir ? "1" : "0"}
-      className={`row ${isCursor ? "focused" : ""} ${isSelected ? "selected" : ""} ${isDissolving ? "row-dissolving" : ""} ${isDroppable ? "droppable" : ""} ${isDropTarget ? "drop-target" : ""} ${isAccepted ? "drop-accepted" : ""}`}
-      draggable={!isRenaming}
-      onDragStart={(ev) => actions.current.dragStart(ev, e)}
-      onClick={(ev) => actions.current.click(ev, e, idx)}
-      onDoubleClick={() => actions.current.dblclick(e)}
-      onKeyDown={(ev) => actions.current.keydown(ev)}
-      onContextMenu={(ev) => actions.current.contextMenu(ev, e)}
-    >
-      {isDropTarget && <span className="drop-badge">松手移入此文件夹</span>}
-      <span className="col name">
-        <FileGlyph entry={e} />
-        {isRenaming ? (
-          <input
-            ref={renameRef}
-            className="rename-input"
-            autoComplete="off"
-            // 非受控：输入过程只改 DOM，不触发整表重渲染；提交时从 ref 取值
-            defaultValue={e.name}
-            onMouseDown={(ev2) => ev2.stopPropagation()}
-            onDoubleClick={(ev2) => ev2.stopPropagation()}
-            onClick={(ev2) => ev2.stopPropagation()}
-            onKeyDown={(ev2) => {
-              ev2.stopPropagation();
-              if (ev2.key === "Enter") {
-                ev2.preventDefault();
-                actions.current.renameCommit();
-              } else if (ev2.key === "Escape") {
-                ev2.preventDefault();
-                actions.current.renameCancel();
-              }
-            }}
-            onBlur={() => actions.current.renameCommit()}
-            spellCheck={false}
-          />
-        ) : (
-          <span className="filename">
-            {e.tags.length > 0 ? e.base + (e.ext ? "." + e.ext : "") : e.name}
-          </span>
-        )}
-      </span>
-      <span className="col tags">
-        {e.tags.map((t) => (
-          <button
-            key={t}
-            className="chip"
-            aria-label={`移除标签 ${t}`}
-            style={{ ["--chip-c" as string]: tagColor(t) }}
-            title={t}
-            onClick={(ev) => {
-              ev.stopPropagation();
-              actions.current.removeTag(e, t);
-            }}
-          >
-            <span className="chip-text">#{t}</span>
-            <IconClose size={11} className="chip-x" />
-          </button>
-        ))}
-      </span>
-      <span className="col date muted">{formatDate(e.modified)}</span>
-      <span className="col size muted">{e.is_dir ? "" : formatSize(e.size)}</span>
-    </div>
-  );
-});
-
-/**
- * 下拉菜单键盘导航：在容器内已渲染的 menuitem 之间移动焦点。
- * 原生 <button> 的 Enter/空格由浏览器自行触发 click，这里只补非按钮元素的激活。
- */
-function menuKeyNav(ev: ReactKeyboardEvent<HTMLElement>, dismiss: () => void) {
-  const items = Array.from(ev.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]'));
-  if (items.length === 0) return;
-  const idx = items.findIndex((el) => el === document.activeElement);
-  const focusAt = (i: number) => items[(i + items.length) % items.length].focus();
-  switch (ev.key) {
-    case "ArrowDown":
-      ev.preventDefault();
-      focusAt(idx < 0 ? 0 : idx + 1);
-      break;
-    case "ArrowUp":
-      ev.preventDefault();
-      focusAt(idx < 0 ? items.length - 1 : idx - 1);
-      break;
-    case "Home":
-      ev.preventDefault();
-      focusAt(0);
-      break;
-    case "End":
-      ev.preventDefault();
-      focusAt(items.length - 1);
-      break;
-    case "Enter":
-    case " ":
-      if (idx >= 0 && items[idx].tagName !== "BUTTON") {
-        ev.preventDefault();
-        items[idx].click();
-      }
-      break;
-    case "Escape":
-      ev.preventDefault();
-      dismiss();
-      break;
-    default:
-      break;
-  }
-}
-
-type ContextMenuProps = {
-  x: number;
-  y: number;
-  paths: string[];
-  single: FileEntry | null;
-  allDirs: boolean;
-  onClose: () => void;
-  onRefresh: () => void;
-  onOpenEntry: () => void;
-  onRename: () => void;
-  onClearTags: () => void;
-  onCopyName: () => void;
-  onCopyPath: () => void;
-  onDissolve: () => void;
-  onCollect: () => void;
-};
-
-/**
- * 自定义右键菜单。
- * 无障碍：带 role=menu/menuitem、内部焦点管理（方向键/Home/End/Enter/Esc 导航），
- * 并按实际尺寸 clamp 到视口内，避免右下角溢出。
- */
-function ContextMenu(props: ContextMenuProps) {
-  const { x, y, paths, single, allDirs, onClose, onRefresh, onOpenEntry, onRename, onClearTags, onCopyName, onCopyPath, onDissolve, onCollect } = props;
-  const menuRef = useRef<HTMLDivElement | null>(null);
-  const itemRefs = useRef<(HTMLDivElement | null)[]>([]);
-
-  // 组装菜单项：统一渲染便于键盘导航。
-  // 用 useMemo 固定引用：否则键盘回调的依赖每次都变（菜单只在打开时渲染，实际开销本就不大）
-  const items = useMemo(() => {
-    const list: { key: string; label: string; danger: boolean; accel?: string; action: () => void }[] = [];
-    const showClearTags = single ? single.tags.length > 0 : paths.length > 1;
-    if (!paths.length) {
-      list.push({ key: "refresh", label: "刷新", danger: false, action: onRefresh });
-    } else {
-      if (single)
-        list.push({
-          key: "open",
-          label: single.is_dir ? "打开文件夹" : "打开文件",
-          danger: false,
-          action: onOpenEntry,
-        });
-      // 复制类操作：仅单选时展示，多选场景路径/文件名含义模糊
-      // 加速键文案跟随平台惯例（macOS 显示 ⌘，与处理器的 metaKey 分支一致）
-      if (single) {
-        list.push({
-          key: "copyname",
-          label: "复制文件名",
-          danger: false,
-          accel: isMac ? "⌘C" : "Ctrl+C",
-          action: onCopyName,
-        });
-        list.push({
-          key: "copypath",
-          label: "复制路径",
-          danger: false,
-          accel: isMac ? "⌘⇧C" : "Ctrl+Shift+C",
-          action: onCopyPath,
-        });
-      }
-      if (single) list.push({ key: "rename", label: "重命名", danger: false, action: onRename });
-      // 解散文件夹：单选文件夹，或多选且全部为文件夹时可用
-      if ((single && single.is_dir) || (paths.length > 1 && allDirs))
-        list.push({ key: "dissolve", label: "解散文件夹", danger: false, action: onDissolve });
-      // 收入文件夹：单选或多选都可用，须有至少一项选中
-      list.push({ key: "collect", label: "收入到文件夹", danger: false, action: onCollect });
-      if (showClearTags)
-        list.push({ key: "cleartags", label: "移除全部标签", danger: false, action: onClearTags });
-    }
-    return list;
-  }, [
-    paths,
-    single,
-    allDirs,
-    onRefresh,
-    onOpenEntry,
-    onCopyName,
-    onCopyPath,
-    onRename,
-    onDissolve,
-    onCollect,
-    onClearTags,
-  ]);
-
-  // 键盘导航焦点下标
-  const [focusIdx, setFocusIdx] = useState(0);
-  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
-
-  // 挂载后按实际尺寸做视口 clamp，避免弹出瞬间溢出
-  useEffect(() => {
-    const el = menuRef.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    setPos({
-      left: x + r.width > vw ? Math.max(4, vw - r.width - 4) : x,
-      top: y + r.height > vh ? Math.max(4, vh - r.height - 4) : y,
-    });
-    // 挂载后聚焦首个可用项；点击弹出时不出现原生焦点环，键盘按需显式聚焦
-    itemRefs.current[0]?.focus({ preventScroll: true });
-    // eslint 忽略：menuRef 仅用于一次性测量
-    void el;
-  }, [x, y]);
-
-  const moveFocus = useCallback(
-    (i: number) => {
-      const n = items.length;
-      if (n === 0) return;
-      const idx = ((i % n) + n) % n;
-      setFocusIdx(idx);
-      itemRefs.current[idx]?.focus({ preventScroll: true });
-    },
-    [items.length]
-  );
-
-  // 容器级键盘导航；stopPropagation 避免冒泡到 .app 触发类型定位/清除选中
-  const onKeyNav = useCallback(
-    (ev: ReactKeyboardEvent) => {
-      const n = items.length;
-      if (n === 0) return;
-      if (
-        ev.key === "ArrowDown" ||
-        ev.key === "ArrowUp" ||
-        ev.key === "Home" ||
-        ev.key === "End" ||
-        ev.key === "Enter" ||
-        ev.key === "Escape"
-      ) {
-        ev.preventDefault();
-        ev.stopPropagation();
-      }
-      switch (ev.key) {
-        case "ArrowDown":
-          moveFocus(focusIdx + 1);
-          break;
-        case "ArrowUp":
-          moveFocus(focusIdx - 1);
-          break;
-        case "Home":
-          moveFocus(0);
-          break;
-        case "End":
-          moveFocus(n - 1);
-          break;
-        case "Enter":
-          items[focusIdx]?.action();
-          break;
-        case "Escape":
-          onClose();
-          break;
-        default:
-          // 其他按键（含打字字符）屏蔽，避免误触类型定位
-          ev.stopPropagation();
-      }
-    },
-    [items, focusIdx, moveFocus, onClose]
-  );
-
-  return (
-    <div
-      ref={menuRef}
-      role="menu"
-      aria-label="文件操作菜单"
-      tabIndex={-1}
-      className="context-menu"
-      style={{ left: pos?.left ?? x, top: pos?.top ?? y, opacity: pos ? 1 : 0 }}
-      onKeyDown={onKeyNav}
-    >
-      {items.map((it, i) => (
-        <div
-          key={it.key}
-          ref={(el) => {
-            itemRefs.current[i] = el;
-          }}
-          role="menuitem"
-          tabIndex={focusIdx === i ? 0 : -1}
-          className={`ctx-item${it.danger ? " ctx-delete" : ""}${i === focusIdx ? " focused" : ""}`}
-          onClick={it.action}
-          onMouseEnter={(ev) => {
-            setFocusIdx(i);
-            ev.currentTarget.focus({ preventScroll: true });
-          }}
-        >
-          <span>{it.label}</span>
-          {it.accel && <span className="ctx-accel">{it.accel}</span>}
-        </div>
-      ))}
     </div>
   );
 }
