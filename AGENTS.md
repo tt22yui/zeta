@@ -21,7 +21,7 @@
 
 - macOS dmg 文件名为 `Zeta_x.x.x_*.dmg`。
 
-- 版本号遵循语义化版本；**每次发布包变更需更新版本号**（package.json、src-tauri/Cargo.toml、tauri.conf.json 等处保持一致），并同步 `CHANGELOG.md`（该文件会被 `release.yml` 用作 Release 正文）。
+- 版本号遵循语义化版本；**每次发布包变更需更新版本号**（package.json、src-tauri/Cargo.toml、tauri.conf.json 等处保持一致），并同步 `CHANGELOG.md`。发布时把累积的 `## [Unreleased]` 改写成 `## [vX.Y.Z] - 日期` 并新开一个空的 `## [Unreleased]`：`release.yml` 只截取与 tag 同名的那一节作为 Release 正文，找不到该节会直接失败。
 
 - Tauri 构建 `--bundles` 参数不支持 `zip`：Windows 发布用 `--no-bundle` 生成 exe 后**手动压缩为 zip**。
 

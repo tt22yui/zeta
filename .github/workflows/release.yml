@@ -135,11 +135,27 @@ jobs:
             -DestinationPath "src-tauri/target/release/bundle/zip/Zeta-win64-${{ github.ref_name }}.zip"
           Get-Item "src-tauri/target/release/bundle/zip/*.zip" | Select-Object Name, Length
 
+      # Release 正文只取 CHANGELOG.md 中当前 tag 对应的那一节，
+      # 否则 body_path 指向整个文件会把历史版本一起贴上去
+      - name: 截取本次版本的发布日志
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          awk -v tag="$TAG" '
+            /^## \[/ { in_section = index($0, "## [" tag "]") == 1 }
+            in_section { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "::error::CHANGELOG.md 中没有 [$TAG] 对应的发布日志小节；请把该版本写成 '## [$TAG] - 日期' 后重试"
+            exit 1
+          fi
+
       # 上传产物到与 tag 同名的 Release，直接发布
       - name: 发布到 Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: Zeta ${{ github.ref_name }}
-          body_path: CHANGELOG.md
+          body_path: RELEASE_NOTES.md
           files: ${{ matrix.release_files }}
